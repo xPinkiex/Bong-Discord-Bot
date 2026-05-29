@@ -1,0 +1,33 @@
+# Environment variables
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+
+# Saved data
+saved_images/
+saved_sounds/
+saved_texts/
+downloads/
+logs/
+backup/
+
+# ChromaDB
+chroma_db/
+
+# IDE / Editor
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Continue
+.continue/
+
+# Opencode
+opencode.json
