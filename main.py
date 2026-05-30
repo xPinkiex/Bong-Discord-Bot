@@ -56,7 +56,7 @@ async def reload_ext(ctx, util: str = "bong"):
         # Snapshot and restore mutable state across all related modules
         # so runtime state (shuffle, current track, pending flags, etc.) survives the reload
         snapshots = {}
-        for mod in [util, util + "_tools", "debug"]:
+        for mod in [util, util + "_tools", "debug", "dm_approval"]:
             if mod in sys.modules:
                 # Save all non-function, non-module, non-class attributes (i.e. runtime state)
                 snapshots[mod] = {k: getattr(sys.modules[mod], k) for k in dir(sys.modules[mod])
@@ -81,6 +81,13 @@ async def reload_ext(ctx, util: str = "bong"):
         
         await bot.load_extension(util)
         debug.log("Bot", f"Reloaded extension {util}")
+
+        # Inject a reload notification into all active channels so Bong has context
+        import bong
+        from datetime import datetime
+        timestamp = datetime.now().strftime('%H:%M')
+        for channel_id, history in list(bong.chat_memories.items()):
+            history.insert(0, f"System at {timestamp}: Bong was hot-reloaded with new code. Previous conversation context is preserved.")
         
         await ctx.message.delete()
     except commands.ExtensionNotLoaded:
