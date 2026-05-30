@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # TODO: Add manual merge
 import argparse
+import sys
 from pathlib import Path
 
 from langchain_chroma import Chroma
@@ -43,7 +44,7 @@ if args.add is not None:
         text = input("Enter memory to add: ").strip()
         if not text:
             print("Cancelled.")
-            exit()
+            sys.exit()
     meta = {}
     if args.user:
         meta["user_id"] = args.user
@@ -57,7 +58,7 @@ elif args.delete is not None:
     total = collection.count()
     if total == 0:
         print("No memories saved yet.")
-        exit()
+        sys.exit()
 
     if args.delete:
         results = db.similarity_search_with_relevance_scores(args.delete, k=10)
@@ -72,7 +73,7 @@ elif args.delete is not None:
         all_data = collection.get(include=["documents", "metadatas"])
         if not all_data["ids"]:
             print("No memories saved yet.")
-            exit()
+            sys.exit()
         indexed = []
         for i, (doc_id, text, meta) in enumerate(zip(all_data["ids"], all_data["documents"], all_data["metadatas"]), 1):
             class _Doc:
@@ -89,13 +90,13 @@ elif args.delete is not None:
 
     if not indexed:
         print("No results found.")
-        exit()
+        sys.exit()
 
     print()
     choice = input("Enter index numbers to delete (comma-separated), or press Enter to cancel: ").strip()
     if not choice:
         print("Cancelled.")
-        exit()
+        sys.exit()
 
     to_delete = []
     for num in choice.split(","):
@@ -113,12 +114,12 @@ elif args.delete is not None:
 
     if not to_delete:
         print("Nothing to delete.")
-        exit()
+        sys.exit()
 
     confirm = input(f"\nDelete {len(to_delete)} memory(s)? [y/N] ").strip().lower()
     if confirm != "y":
         print("Cancelled.")
-        exit()
+        sys.exit()
 
     collection.delete(ids=to_delete)
     print(f"Deleted {len(to_delete)} memory(s).")
@@ -129,7 +130,7 @@ elif args.what:
 
     if total == 0:
         print("No memories saved yet.")
-        exit()
+        sys.exit()
 
     results = db.similarity_search_with_relevance_scores(args.what, k=args.k)
 
@@ -148,7 +149,7 @@ elif args.edit is not None:
     total = collection.count()
     if total == 0:
         print("No memories saved yet.")
-        exit()
+        sys.exit()
 
     if args.edit:
         results = db.similarity_search_with_relevance_scores(args.edit, k=10)
@@ -163,7 +164,7 @@ elif args.edit is not None:
         all_data = collection.get(include=["documents", "metadatas"])
         if not all_data["ids"]:
             print("No memories saved yet.")
-            exit()
+            sys.exit()
         indexed = []
         for i, (doc_id, text, meta) in enumerate(zip(all_data["ids"], all_data["documents"], all_data["metadatas"]), 1):
             class _Doc:
@@ -180,18 +181,18 @@ elif args.edit is not None:
 
     if not indexed:
         print("No results found.")
-        exit()
+        sys.exit()
 
     print()
     choice = input("Enter the index number of the memory to edit, or press Enter to cancel: ").strip()
     if not choice or not choice.isdigit():
         print("Cancelled.")
-        exit()
+        sys.exit()
 
     idx = int(choice) - 1
     if idx < 0 or idx >= len(indexed):
         print(f"Index {choice} out of range.")
-        exit()
+        sys.exit()
 
     doc, score = indexed[idx]
     doc_id = doc.id if hasattr(doc, 'id') else doc.metadata.get("id")
@@ -202,7 +203,7 @@ elif args.edit is not None:
     new_text = input("New text (or Enter to keep current): ").strip()
     if not new_uid and not new_text:
         print("Cancelled.")
-        exit()
+        sys.exit()
 
     orig_meta = doc.metadata.copy() if doc.metadata else {}
     if new_uid:
@@ -227,7 +228,7 @@ elif args.list:
 
     if total == 0:
         print("No memories saved yet.")
-        exit()
+        sys.exit()
 
     all_data = collection.get(include=["documents", "metadatas"])
     for i, (text, meta) in enumerate(zip(all_data["documents"], all_data["metadatas"]), 1):
@@ -240,12 +241,12 @@ elif args.migrate is not None:
     total = collection.count()
     if total == 0:
         print("No memories stored yet.")
-        exit()
+        sys.exit()
 
     all_data = collection.get(include=["documents", "metadatas"])
     if not all_data["ids"]:
         print("No memories stored yet.")
-        exit()
+        sys.exit()
 
     def parse_kv(s):
         if "=" not in s:
@@ -262,7 +263,7 @@ elif args.migrate is not None:
         old_k, old_v = parse_kv(args.migrate[0])
         new_k, new_v = parse_kv(args.migrate[1])
         if old_k is None or new_k is None:
-            exit()
+            sys.exit()
 
         matching = [
             (doc_id, meta)
@@ -272,13 +273,13 @@ elif args.migrate is not None:
 
         if not matching:
             print(f"No memories with {old_k}={old_v} found.")
-            exit()
+            sys.exit()
 
         print(f"Found {len(matching)} memories with {old_k}={old_v}.")
         confirm = input(f"Replace: remove {old_k}={old_v}, set {new_k}={new_v}? [y/N] ").strip().lower()
         if confirm != "y":
             print("Cancelled.")
-            exit()
+            sys.exit()
 
         for doc_id, meta in matching:
             new_meta = {k: v for k, v in meta.items() if k != old_k}
@@ -290,12 +291,12 @@ elif args.migrate is not None:
     elif len(args.migrate) == 1:
         key, val = parse_kv(args.migrate[0])
         if key is None:
-            exit()
+            sys.exit()
 
         confirm = input(f"Set {key}={val} on ALL {total} memories? [y/N] ").strip().lower()
         if confirm != "y":
             print("Cancelled.")
-            exit()
+            sys.exit()
 
         for doc_id, meta in zip(all_data["ids"], all_data["metadatas"]):
             new_meta = dict(meta)
@@ -313,7 +314,7 @@ elif args.migrate is not None:
 
         if not needs_update:
             print("No memories need metadata updates. Use KEY=VALUE mode to add/replace metadata.")
-            exit()
+            sys.exit()
 
         print(f"Found {len(needs_update)} memories needing updates:\n")
 

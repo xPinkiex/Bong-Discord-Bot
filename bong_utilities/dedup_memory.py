@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # TODO: Add manual merge (let user pick any entries to merge, not just detected duplicates)
 import argparse
+import sys
 from pathlib import Path
 
 from langchain_chroma import Chroma
@@ -41,7 +42,7 @@ all_texts = all_data["documents"]
 
 if not all_ids:
     print("No memories stored yet.")
-    exit()
+    sys.exit()
 
 print(f"Checking {len(all_ids)} memories for duplicates (threshold: {args.threshold})...\n")
 
@@ -73,7 +74,7 @@ for i, (doc_id, text) in enumerate(zip(all_ids, all_texts)):
 
 if not merge_groups:
     print("No duplicates found.")
-    exit()
+    sys.exit()
 
 print(f"Found {len(merge_groups)} group(s) to merge:\n")
 
@@ -101,7 +102,7 @@ for i, (keep_id, keep_text, dupe_ids, dupe_texts, score) in enumerate(merge_grou
         choice = input(f"  Merge group {i}? [y/n/a(ll)/q(uit)] ").strip().lower()
         if choice == "q":
             print("Cancelled.")
-            exit()
+            sys.exit()
         elif choice == "a":
             # Auto-accept all remaining groups
             final_groups.append((all_entries, excluded_indices))
@@ -119,11 +120,11 @@ for i, (keep_id, keep_text, dupe_ids, dupe_texts, score) in enumerate(merge_grou
 
 if not final_groups:
     print("Nothing to merge.")
-    exit()
+    sys.exit()
 
 if args.dry_run:
     print("Dry run — no changes made.")
-    exit()
+    sys.exit()
 
 for all_entries, excluded_indices in final_groups:
     to_merge = [(eid, txt) for j, (eid, txt) in enumerate(all_entries) if j not in excluded_indices]

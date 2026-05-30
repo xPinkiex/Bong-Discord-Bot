@@ -96,6 +96,8 @@ def retrieve_memories(query: str, username: str = "", user_id: int = None, k: in
         return ""
 
 
+BOT_USER_ID = "698627881760456724"
+
 # Shared state — tools write to these during the sync tool loop,
 # and the cog reads/acts on them afterwards since Discord calls are async
 pending_reactions = []       # Emoji reactions queued by the react tool
@@ -122,6 +124,22 @@ shuffle_enabled = False
 loop_enabled = False
 loop_track = None
 current_track = None
+
+def reset_pending():
+    """Clear all pending state flags. Called from the cog on exception or after dispatch."""
+    bong_tools.pending_reactions.clear()
+    bong_tools.pending_join_voice = None
+    bong_tools.pending_leave_voice = None
+    bong_tools.pending_shutdown = False
+    bong_tools.pending_play_audio = None
+    bong_tools.pending_pause = False
+    bong_tools.pending_resume = False
+    bong_tools.pending_stop = False
+    bong_tools.pending_skip = False
+    bong_tools.pending_skip_target = None
+    bong_tools.pending_skip_info = ""
+    bong_tools.pending_send_image = None
+    bong_tools.pending_send_text = None
 
 image_library = []
 

@@ -61,7 +61,7 @@ MAX_TOOL_ITERATIONS = 10
 
 async def is_talking_to_bong(message_content: str, recent_messages: list, reply_context: str = "", bot_display_name: str = "Bong") -> bool:
     """Check if the user is talking to Bong — fast path for obvious mentions, LLM for ambiguous cases."""
-    if "bong" in message_content.lower() or "<@698627881760456724>" in message_content:
+    if "bong" in message_content.lower() or f"<@{bong_tools.BOT_USER_ID}>" in message_content:
         return True
 
     tagged_name = f"{bot_display_name} (Bong)"
@@ -670,31 +670,31 @@ class BongCog(commands.Cog):
             record_passive_message(history, message, attachment_desc)
             return
 
-        try:
-            guild = message.guild
-            _, voice_status = build_voice_status(guild)
-            system_msg = build_system_prompt(message, history, voice_status, attachment_desc, image_attachments, text_attachments, replied, replied_to)
+        async with message.channel.typing():
+            try:
+                guild = message.guild
+                _, voice_status = build_voice_status(guild)
+                system_msg = build_system_prompt(message, history, voice_status, attachment_desc, image_attachments, text_attachments, replied, replied_to)
 
-            messages = [HumanMessage(content=system_msg)]
+                messages = [HumanMessage(content=system_msg)]
 
-            last_prompt_path = Path(__file__).parent / "logs" / "last_prompt.log"
-            last_prompt_path.write_text(system_msg + "\n\n========\n", encoding="utf-8")
+                last_prompt_path = Path(__file__).parent / "logs" / "last_prompt.log"
+                last_prompt_path.write_text(system_msg + "\n\n========\n", encoding="utf-8")
 
-            debug.log_to_file("AI", f"QUERY from {message.author.display_name} ({message.author.id}): {message.content}")
+                debug.log_to_file("AI", f"QUERY from {message.author.display_name} ({message.author.id}): {message.content}")
 
-            await update_voice_state(guild, message.author.id)
-            bong_tools.authorized = message.author.id in ALLOWED_USERS
-            bong_tools.current_user_id = message.author.id
+                await update_voice_state(guild, message.author.id)
+                bong_tools.authorized = message.author.id in ALLOWED_USERS
+                bong_tools.current_user_id = message.author.id
 
-            bound_model = base_model.bind_tools(bong_tools.tools)
-            result, tool_summaries = await run_tool_loop(bound_model, messages, image_attachments, text_attachments, last_prompt_path)
+                bound_model = base_model.bind_tools(bong_tools.tools)
+                result, tool_summaries = await run_tool_loop(bound_model, messages, image_attachments, text_attachments, last_prompt_path)
 
-            await apply_reactions(message)
-            record_history(history, message, result, attachment_desc, tool_summaries)
+                await apply_reactions(message)
+                record_history(history, message, result, attachment_desc, tool_summaries)
 
-            voice_error = await dispatch_voice_actions(guild, message)
+                voice_error = await dispatch_voice_actions(guild, message)
 
-            async with message.channel.typing():
                 if voice_error:
                     messages.append(HumanMessage(content=f"System: The voice/audio action failed with this error: {voice_error}. Please let the user know and suggest what they can do."))
                     error_response = await asyncio.to_thread(model.invoke, messages)
@@ -703,18 +703,19 @@ class BongCog(commands.Cog):
                 else:
                     await message.channel.send(result)
 
-            if bong_tools.pending_shutdown:
-                if message.author.id in ALLOWED_USERS:
-                    await message.add_reaction("🫡")
-                    await self.bot.close()
-                else:
-                    debug.log("AI", "Unauthorized shutdown attempt")
-                bong_tools.pending_shutdown = False
+                if bong_tools.pending_shutdown:
+                    if message.author.id in ALLOWED_USERS:
+                        await message.add_reaction("🫡")
+                        await self.bot.close()
+                    else:
+                        debug.log("AI", "Unauthorized shutdown attempt")
+                    bong_tools.pending_shutdown = False
 
-        except Exception as e:
-            debug.log("AI", f"Error generating response: {e}")
-            debug.log_to_file("AI", f"Error generating response: {e}")
-            await message.channel.send("Something went wrong processing that message. Try again?")
+            except Exception as e:
+                debug.log("AI", f"Error generating response: {e}")
+                debug.log_to_file("AI", f"Error generating response: {e}")
+                bong_tools.reset_pending()
+                await message.channel.send("Something went wrong processing that message. Try again?")
 
     @commands.command(name="llm", help="Toggle Bong's activity in the current channel")
     async def llm(self, ctx):
