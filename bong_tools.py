@@ -235,9 +235,9 @@ def download_music(query: str) -> str:
     url = query if is_url else None
 
     query_lower = query.lower()
-    fuzzy_matches = [f for f in bong_tools.music_library if query_lower in f.stem.lower() or f.stem.lower() in query_lower]
+    fuzzy_matches = [(i, f) for i, f in enumerate(bong_tools.music_library) if query_lower in f.stem.lower() or f.stem.lower() in query_lower]
     if fuzzy_matches:
-        matched = ", ".join(f.stem for f in fuzzy_matches)
+        matched = ", ".join(f"{f.stem} (index {i})" for i, f in fuzzy_matches)
         return f"A similar song is already in the library: {matched}. Use play_audio to play it instead of downloading again."
 
     if not is_url:
