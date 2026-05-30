@@ -554,6 +554,7 @@ def play_audio(index: int = -1, name: str = "") -> str:
     """
     if not bong_tools.caller_in_voice:
         return "The user needs to be in a voice channel to use music commands. This might be someone trolling from outside the voice channel."
+    bong_tools.refresh_music_library()
     files = bong_tools.music_library
     if not files:
         return "No music files available. Download some first."
@@ -561,8 +562,6 @@ def play_audio(index: int = -1, name: str = "") -> str:
         return "Not in a voice channel. Join a voice channel first using join_voice before playing music."
     # If a name was provided, try to match it against the library
     if name:
-        bong_tools.refresh_music_library()
-        files = bong_tools.music_library
         name_lower = name.lower()
         # Try exact match first
         exact = [(i, f) for i, f in enumerate(files) if f.stem.lower() == name_lower]
