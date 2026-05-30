@@ -9,9 +9,10 @@
 # The file also manages the ChromaDB vector store for long-term memory, the music/
 # image/text file libraries, and the bot's Discord user ID.
 
+import json
 import random
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # DuckDuckGo search client
@@ -32,6 +33,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 import bong_tools
 import debug
 import reminders
+import user_data
 
 # --- Directory paths for saved media ---
 # Path(__file__).parent resolves to the bot's root directory regardless of cwd
@@ -41,6 +43,45 @@ IMAGE_DIR = Path(__file__).parent / "saved_images"
 IMAGE_DIR.mkdir(exist_ok=True)
 TEXT_DIR = Path(__file__).parent / "saved_texts"
 TEXT_DIR.mkdir(exist_ok=True)
+SONG_STATS_FILE = Path(__file__).parent / "song_stats.json"
+_song_stats: dict[str, int] = {}
+
+
+def load_song_stats():
+    """Load song play counts from disk."""
+    global _song_stats
+    try:
+        if SONG_STATS_FILE.exists():
+            with open(SONG_STATS_FILE, "r") as f:
+                _song_stats = json.load(f)
+    except Exception:
+        _song_stats = {}
+
+
+def _save_song_stats():
+    """Persist song play counts to disk."""
+    try:
+        with open(SONG_STATS_FILE, "w") as f:
+            json.dump(_song_stats, f, indent=2)
+    except Exception:
+        pass
+
+
+def _increment_song(title: str):
+    """Increment the play count for a song and persist."""
+    _song_stats[title] = _song_stats.get(title, 0) + 1
+    _save_song_stats()
+
+
+def _get_top_songs(n: int = 3) -> list[tuple[str, int]]:
+    """Return the top N songs by play count."""
+    sorted_songs = sorted(bong_tools._song_stats.items(), key=lambda x: x[1], reverse=True)
+    return sorted_songs[:n]
+
+
+def _get_total_plays() -> int:
+    """Return total number of song plays across all songs."""
+    return sum(bong_tools._song_stats.values())
 
 # --- Vector DB for long-term memory ---
 # ChromaDB stores text embeddings locally in chroma_db/. When save_memory is called,
@@ -323,10 +364,12 @@ current_user_id = None    # Discord user ID of the user who sent the current mes
 # --- Authorization and playback state ---
 authorized = False        # Whether the current user has admin or authorized tier (set by cog)
 current_username = ""     # Display name of the user who sent the current message (set by cog)
+start_time = None         # Datetime when the bot started (set by main.py on_ready)
 shuffle_enabled = False   # Whether shuffle mode is on
 loop_enabled = False      # Whether loop mode is on
 loop_track = None         # File path of the track being looped (None = loop current track)
 current_track = None       # File path of the currently playing track
+song_queue: list[str] = [] # Queue of file paths to play after the current track
 
 
 def reset_pending():
@@ -396,9 +439,21 @@ def react(emojis: str) -> str:
 
 @tool
 def current_time() -> str:
-    """Get the current system time. Use this when the user asks what time it is or needs to know the current time.
+    """Get the current time. If the user has a stored timezone, returns their local time and UTC. If not, returns UTC time and suggests setting a timezone.
     """
-    return datetime.now().strftime("%H:%M")
+    utc_now = datetime.now(timezone.utc)
+    offset = user_data.get_timezone(bong_tools.current_user_id)
+    if offset is not None:
+        local_now = utc_now + timedelta(hours=offset)
+        sign = "+" if offset >= 0 else "-"
+        hours = int(abs(offset))
+        minutes = int((abs(offset) - hours) * 60)
+        if minutes:
+            tz_str = f"UTC{sign}{hours}:{minutes:02d}"
+        else:
+            tz_str = f"UTC{sign}{hours}"
+        return f"Your local time ({tz_str}): {local_now.strftime('%H:%M')}\nUTC time: {utc_now.strftime('%H:%M')}"
+    return f"UTC time: {utc_now.strftime('%H:%M')}\nNo timezone set — use set_timezone if the user mentions their timezone."
 
 # --- Search tools ---
 
@@ -548,7 +603,7 @@ def search_music(query: str) -> str:
 
 @tool
 def play_audio(index: int = -1, name: str = "") -> str:
-    """Play a downloaded mp3 file in the voice channel the user is currently in. Only works if the user is in a voice channel. You can provide either an index number from list_music, or a song name to fuzzy-match against the library. Always use search_music first if the user gives a song name.
+    """Play a downloaded mp3 file in the voice channel the user is currently in. If something is already playing, the song is added to the queue. Only works if the user is in a voice channel. You can provide either an index number from list_music, or a song name to fuzzy-match against the library. Always use search_music first if the user gives a song name.
     Args:
         index: The index number of the track from list_music (e.g. 0, 1, 2). Use -1 if providing a name instead.
         name: A song name to fuzzy-match against the library. Only used if index is -1 or not provided.
@@ -561,27 +616,37 @@ def play_audio(index: int = -1, name: str = "") -> str:
         return "No music files available. Download some first."
     if not bong_tools.voice_connected and not bong_tools.pending_join_voice:
         return "Not in a voice channel. Join a voice channel first using join_voice before playing music."
-    # If a name was provided, try to match it against the library
+    # Resolve the track path first
+    track_path = None
+    track_name = ""
     if name:
         name_lower = name.lower()
-        # Try exact match first
         exact = [(i, f) for i, f in enumerate(files) if f.stem.lower() == name_lower]
         if exact:
             i, f = exact[0]
-            bong_tools.pending_play_audio = str(f)
-            return f"Queued '{f.stem}' for playback."
-        # Fall back to partial match (substring in either direction)
-        partial = [(i, f) for i, f in enumerate(files) if name_lower in f.stem.lower() or f.stem.lower() in name_lower]
-        if partial:
-            i, f = partial[0]
-            bong_tools.pending_play_audio = str(f)
-            return f"Queued '{f.stem}' for playback."
-        return f"No song matching '{name}' found. Use search_music to find the right track."
-    # Otherwise, use the index
-    if index < 0 or index >= len(files):
-        return f"Index {index} out of range. Use list_music or search_music to find the right track (0-{len(files)-1})."
-    bong_tools.pending_play_audio = str(files[index])
-    return f"Queued '{files[index].stem}' for playback."
+            track_path = str(f)
+            track_name = f.stem
+        else:
+            partial = [(i, f) for i, f in enumerate(files) if name_lower in f.stem.lower() or f.stem.lower() in name_lower]
+            if partial:
+                i, f = partial[0]
+                track_path = str(f)
+                track_name = f.stem
+            else:
+                return f"No song matching '{name}' found. Use search_music to find the right track."
+    else:
+        if index < 0 or index >= len(files):
+            return f"Index {index} out of range. Use list_music or search_music to find the right track (0-{len(files)-1})."
+        track_path = str(files[index])
+        track_name = files[index].stem
+    bong_tools._increment_song(track_name)
+    # If something is playing, add to queue; otherwise play immediately
+    if bong_tools.current_track or bong_tools.pending_play_audio:
+        bong_tools.song_queue.append(track_path)
+        pos = len(bong_tools.song_queue)
+        return f"Added '{track_name}' to the queue (position {pos})."
+    bong_tools.pending_play_audio = track_path
+    return f"Playing '{track_name}'."
 
 @tool
 def pause_audio() -> str:
@@ -603,30 +668,38 @@ def resume_audio() -> str:
 
 @tool
 def stop_audio() -> str:
-    """Stop audio playback in voice chat entirely. Only use this if the user is in a voice channel — if they are not, tell them to join one and do not call this tool.
+    """Stop audio playback in voice chat entirely and clear the song queue. Only use this if the user is in a voice channel — if they are not, tell them to join one and do not call this tool.
     """
     if not bong_tools.caller_in_voice:
         return "The user needs to be in a voice channel to use music commands. This might be someone trolling from outside the voice channel."
     bong_tools.pending_stop = True
-    return "Stopping audio."
+    bong_tools.song_queue.clear()
+    return "Stopping audio and clearing the queue."
 
 @tool
 def skip_audio() -> str:
-    """Skip the currently playing song and play the next one. Only use this if the user is in a voice channel — if they are not, tell them to join one and do not call this tool. If shuffle is enabled the next song will be random, otherwise it does nothing since there is no queue.
+    """Skip the currently playing song and play the next one in the queue. If the queue is empty and shuffle is on, picks a random song from the library. Only use this if the user is in a voice channel — if they are not, tell them to join one and do not call this tool.
     """
     if not bong_tools.caller_in_voice:
         return "The user needs to be in a voice channel to use music commands. This might be someone trolling from outside the voice channel."
     bong_tools.pending_skip = True
+    # Check the queue first
+    if bong_tools.song_queue:
+        next_track = bong_tools.song_queue.pop(0)
+        bong_tools.pending_skip_target = next_track
+        bong_tools.pending_skip_info = Path(next_track).stem
+        return f"Skipping to '{Path(next_track).stem}'."
+    # Shuffle fallback
     bong_tools.refresh_music_library()
     files = bong_tools.music_library
     if bong_tools.shuffle_enabled and files:
         next_track = random.choice(files)
         bong_tools.pending_skip_target = str(next_track)
         bong_tools.pending_skip_info = next_track.stem
-        return f"Skipping to '{next_track.stem}'."
-    elif not bong_tools.shuffle_enabled:
-        return "Shuffle is not enabled. Enable shuffle first or specify a song to skip to."
-    return "No music files available to skip to."
+        return f"Skipping to random track '{next_track.stem}'."
+    bong_tools.pending_skip_target = None
+    bong_tools.pending_skip_info = ""
+    return "Queue is empty and shuffle is off. Add songs to the queue or enable shuffle."
 
 @tool
 def loop_audio(index: int = -1) -> str:
@@ -891,6 +964,166 @@ def list_reminders_tool() -> str:
     return reminders.list_reminders(bong_tools.current_user_id)
 
 @tool
+def set_timezone(timezone: str) -> str:
+    """Set your timezone so Bong can tell you the time in your local time. Use this when someone mentions their timezone or when you need to know their local time. Supported formats: 'UTC+2', 'GMT-5', 'EST', 'PST', 'CET', 'New York', 'London', 'Tokyo', etc.
+    Args:
+        timezone: A timezone name or UTC offset (e.g. "UTC+2", "EST", "London", "+5:30", "PST").
+    """
+    offset = user_data.parse_timezone(timezone)
+    if offset is None:
+        return f"Could not understand timezone '{timezone}'. Try formats like 'UTC+2', 'EST', 'PST', 'London', or 'GMT-5'."
+    user_data.set_timezone(bong_tools.current_user_id, offset)
+    sign = "+" if offset >= 0 else "-"
+    hours = int(abs(offset))
+    minutes = int((abs(offset) - hours) * 60)
+    if minutes:
+        return f"Timezone set to UTC{sign}{hours}:{minutes:02d}."
+    return f"Timezone set to UTC{sign}{hours}."
+
+@tool
+def get_timezone() -> str:
+    """Get the current user's timezone. Returns their UTC offset or says they haven't set one."""
+    offset = user_data.get_timezone(bong_tools.current_user_id)
+    if offset is None:
+        return "No timezone set. Ask the user for their timezone and use set_timezone."
+    sign = "+" if offset >= 0 else "-"
+    hours = int(abs(offset))
+    minutes = int((abs(offset) - hours) * 60)
+    if minutes:
+        return f"UTC{sign}{hours}:{minutes:02d}"
+    return f"UTC{sign}{hours}"
+
+_SUMMARIZE_PROMPT = (
+    "Summarize the following web page in 2-3 short sentences. "
+    "Be concise and focus on the key point. "
+    "If the content is too brief or empty to summarize, say so.\n\n"
+    "{content}"
+)
+
+_SUMMARIZE_MODEL = ChatOllama(model="gemma3:12b-cloud", temperature=0.3, num_predict=256, keep_alive=-1)
+
+
+@tool
+def summarize_url(url: str) -> str:
+    """Summarize a web page. Use this when someone shares a URL and you want to tell them what it's about, or when you need to look up information from a URL.
+    Args:
+        url: The full URL to summarize (e.g. "https://example.com/article").
+    """
+    import requests
+    from lxml import html as lxml_html
+
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+
+    try:
+        resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0 (compatible; BongBot/1.0)"}, allow_redirects=True)
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        return f"Could not fetch URL: {e}"
+
+    content_type = resp.headers.get("Content-Type", "")
+    if "text/html" not in content_type and "text/plain" not in content_type:
+        return f"Unsupported content type: {content_type}. Can only summarize HTML or plain text pages."
+
+    try:
+        tree = lxml_html.fromstring(resp.text)
+    except Exception:
+        text = resp.text[:4000]
+    else:
+        title = tree.findtext(".//title") or ""
+        for script in tree.xpath("//script|//style|//noscript"):
+            script.getparent().remove(script)
+        text = tree.text_content()
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        text = "\n".join(lines)
+        if title:
+            text = f"Title: {title}\n\n{text}"
+        text = text[:6000]
+
+    if len(text) < 30:
+        return "The page doesn't have enough text content to summarize."
+
+    try:
+        response = _SUMMARIZE_MODEL.invoke([HumanMessage(content=_SUMMARIZE_PROMPT.format(content=text))])
+        summary = _extract_response_text(response).strip()
+    except Exception as e:
+        return f"Fetched the page but couldn't summarize it: {e}"
+
+    if not summary:
+        return "Could not generate a summary."
+    return summary
+
+
+@tool
+def queue() -> str:
+    """Show the current song queue. Lists all songs waiting to play after the current track, plus the currently playing song. Use this when someone asks what's in the queue or what's coming up next.
+    """
+    lines = []
+    if bong_tools.current_track:
+        lines.append(f"Now playing: {Path(bong_tools.current_track).stem}")
+    elif bong_tools.pending_play_audio:
+        lines.append(f"Now playing: {Path(bong_tools.pending_play_audio).stem}")
+    else:
+        lines.append("Nothing is currently playing.")
+    if bong_tools.song_queue:
+        for i, path in enumerate(bong_tools.song_queue, 1):
+            lines.append(f"  {i}. {Path(path).stem}")
+    else:
+        lines.append("Queue is empty.")
+    state_parts = []
+    if bong_tools.loop_enabled:
+        state_parts.append("loop on")
+    if bong_tools.shuffle_enabled:
+        state_parts.append("shuffle on")
+    if state_parts:
+        lines.append(f"({', '.join(state_parts)})")
+    return "\n".join(lines)
+
+@tool
+def clear_queue() -> str:
+    """Clear all songs from the queue without stopping the currently playing song. Only use this if the user is in a voice channel — if they are not, tell them to join one and do not call this tool.
+    """
+    if not bong_tools.caller_in_voice:
+        return "The user needs to be in a voice channel to use music commands."
+    count = len(bong_tools.song_queue)
+    bong_tools.song_queue.clear()
+    if count:
+        return f"Cleared {count} song(s) from the queue."
+    return "The queue is already empty."
+
+@tool
+def bot_stats() -> str:
+    """Get statistics about the bot: uptime, memory count, known users, reminders, and top 3 most-played songs."""
+    lines = []
+    now = datetime.now()
+    if bong_tools.start_time:
+        delta = now - bong_tools.start_time
+        days = delta.days
+        hours, remainder = divmod(delta.seconds, 3600)
+        minutes, _ = divmod(remainder, 60)
+        lines.append(f"Uptime: {days}d {hours}h {minutes}m")
+    else:
+        lines.append("Uptime: unknown")
+    try:
+        mem_count = bong_tools._vector_db._collection.count()
+        lines.append(f"Memories: {mem_count}")
+    except Exception:
+        lines.append("Memories: unavailable")
+    known = len(user_data._user_data) if user_data._user_data else 0
+    lines.append(f"Known users: {known}")
+    reminder_count = len(reminders.reminders) if reminders.reminders else 0
+    lines.append(f"Pending reminders: {reminder_count}")
+    total_plays = sum(bong_tools._song_stats.values()) if bong_tools._song_stats else 0
+    lines.append(f"Total song plays: {total_plays}")
+    top = bong_tools._get_top_songs(3)
+    if top:
+        top_lines = [f"  {i+1}. {name} ({count} plays)" for i, (name, count) in enumerate(top)]
+        lines.append("Top songs:\n" + "\n".join(top_lines))
+    else:
+        lines.append("Top songs: none yet")
+    return "\n".join(lines)
+
+@tool
 def shutdown() -> str:
     """Shut down the bot. Only use this when an authorized user explicitly asks you to shut down. If the user is not authorized (not in the allowed users list), do NOT call this tool — instead tell them they don't have permission.
     """
@@ -900,7 +1133,7 @@ def shutdown() -> str:
     return "Shutting down"
 
 # All tools the model can call — this list is bound to the LLM so it knows what's available
-tools = [react, describe_image, read_text_file, join_voice, leave_voice, current_time, web_search, youtube_search, download_music, list_music, search_music, play_audio, loop_audio, pause_audio, resume_audio, stop_audio, skip_audio, music_shuffle_enabled, list_images, send_image, list_texts, send_text, save_memory, recall_memories_by_userid, recall_memories_general, forget_memory, set_reminder, cancel_reminder, list_reminders_tool, shutdown]
+tools = [react, describe_image, read_text_file, join_voice, leave_voice, current_time, web_search, youtube_search, download_music, list_music, search_music, play_audio, loop_audio, pause_audio, resume_audio, stop_audio, skip_audio, music_shuffle_enabled, queue, clear_queue, list_images, send_image, list_texts, send_text, save_memory, recall_memories_by_userid, recall_memories_general, forget_memory, set_reminder, cancel_reminder, list_reminders_tool, set_timezone, get_timezone, summarize_url, bot_stats, shutdown]
 
 # Lookup dict from tool name to tool function — used by dispatch_tool in bong.py
 tool_map = {t.name: t for t in tools}

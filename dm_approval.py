@@ -1,74 +1,17 @@
-# dm_approval.py — Permission tiers and DM approval system for Bong
-#
-# Three permission tiers:
-#   admin     — Full access: all commands, shutdown, channel toggle, DM access
-#   authorized — Full access for now (future-proofing for restricted commands)
-#   user      — Chatting + all tools (music, voice, memory, etc.) but no system commands
+# dm_approval.py — DM approval system for unauthorized users
 #
 # When a non-allowlisted user DMs Bong, this module sends a request to Eve
-# with approve/deny buttons. Approved users are persisted to users.json.
+# with tier selection buttons. Approved users are persisted via user_data.py
+# into users.json.
 
-import json
 import discord
-from pathlib import Path
-
-# Path to the JSON file that persists user tiers across restarts
-_USERS_FILE = Path(__file__).parent / "users.json"
-
-# In-memory tier lookup: user_id -> "admin" | "authorized" | "user"
-user_tiers: dict[int, str] = {}
+import user_data
 
 # Track users currently waiting for approval so we don't send duplicate requests
 pending_approval: set[int] = set()
 
-# The owner who receives approval requests — always has admin access even if the file is missing
-OWNER_ID = 273761843544064000
-
-
-def load_users():
-    """Load user tiers from disk. The owner is always guaranteed admin access."""
-    global user_tiers
-    user_tiers = {}
-    try:
-        if _USERS_FILE.exists():
-            with open(_USERS_FILE, "r") as f:
-                file_data = json.load(f)
-            for uid_str, tier in file_data.items():
-                user_tiers[int(uid_str)] = tier
-    except Exception:
-        pass
-    # Owner is always admin — even if the file is missing or corrupted
-    user_tiers[OWNER_ID] = "admin"
-
-
-def save_users():
-    """Persist all user tiers to disk."""
-    try:
-        data = {str(uid): tier for uid, tier in user_tiers.items()}
-        with open(_USERS_FILE, "w") as f:
-            json.dump(data, f, indent=2)
-    except Exception:
-        pass
-
-
-def get_tier(user_id: int) -> str | None:
-    """Get the permission tier for a user, or None if not in any tier."""
-    return user_tiers.get(user_id)
-
-
-def is_admin(user_id: int) -> bool:
-    """Check if a user has admin tier (full access including system commands)."""
-    return user_tiers.get(user_id) == "admin"
-
-
-def is_authorized(user_id: int) -> bool:
-    """Check if a user has admin or authorized tier (full access)."""
-    return user_tiers.get(user_id) in ("admin", "authorized")
-
-
-def is_known(user_id: int) -> bool:
-    """Check if a user is in any tier (admin, authorized, or user)."""
-    return user_id in user_tiers
+# The owner who receives approval requests
+OWNER_ID = user_data.OWNER_ID
 
 
 class ApproveView(discord.ui.View):
@@ -83,8 +26,7 @@ class ApproveView(discord.ui.View):
         if interaction.user.id != OWNER_ID:
             await interaction.response.send_message("Only Eve can approve DM access.", ephemeral=True)
             return
-        user_tiers[self.requesting_user.id] = tier
-        save_users()
+        user_data.set_tier(self.requesting_user.id, tier)
         pending_approval.discard(self.requesting_user.id)
         self.stop()
         tier_label = {"admin": "Admin", "authorized": "Authorized", "user": "User"}[tier]
@@ -138,7 +80,7 @@ async def process_dm(message: discord.Message, bot: discord.Client) -> bool:
     """
     user = message.author
 
-    if is_known(user.id):
+    if user_data.is_known(user.id):
         return True
 
     if user.id in pending_approval:

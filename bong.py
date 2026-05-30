@@ -27,6 +27,7 @@ import bong_tools
 import debug
 import dm_approval
 import reminders
+import user_data
 
 # --- LLM Models ---
 # The classifier model is fast and cheap — it only needs to output YES/NO
@@ -438,8 +439,8 @@ def _make_after_play_callback(guild):
     """Create a closure that auto-continues playback after a track finishes.
     
     This is attached to discord.py's FFmpegPCMAudio as the `after` callback.
-    When a song ends naturally, this function checks if loop or shuffle is enabled
-    and starts the next track automatically.
+    When a song ends naturally, this function checks the queue, then loop,
+    then shuffle, and starts the next track automatically.
     """
     def after_play(err):
         if err:
@@ -456,11 +457,17 @@ def _make_after_play_callback(guild):
         if bong_tools.pending_play_audio or bong_tools.pending_skip or bong_tools.pending_stop:
             return
         try:
-            # Loop mode: replay the current track
+            # 1) Queue: pop next song
+            if bong_tools.song_queue:
+                next_track = bong_tools.song_queue.pop(0)
+                bong_tools.current_track = next_track
+                vc.play(discord.FFmpegPCMAudio(next_track, options="-filter:a volume=0.3"), after=after_play)
+                return
+            # 2) Loop mode: replay the current track
             if bong_tools.loop_enabled and bong_tools.current_track:
                 vc.play(discord.FFmpegPCMAudio(bong_tools.current_track, options="-filter:a volume=0.3"), after=after_play)
                 return
-            # Shuffle mode: pick a random track
+            # 3) Shuffle mode: pick a random track from library
             if bong_tools.shuffle_enabled:
                 files = list(bong_tools.DOWNLOAD_DIR.glob("*.mp3"))
                 if files:
@@ -603,6 +610,7 @@ async def _dispatch_stop_audio(guild):
     bong_tools.loop_enabled = False
     bong_tools.loop_track = None
     bong_tools.current_track = None
+    bong_tools.song_queue.clear()
     vc = guild.voice_client if guild else None
     error = None
     if vc and (vc.is_playing() or vc.is_paused()):
@@ -809,7 +817,7 @@ class BongCog(commands.Cog):
         # Handle DMs — check approval before responding
         if isinstance(message.channel, discord.DMChannel):
             # Allowlisted users and pre-approved users skip the approval flow
-            if not dm_approval.is_known(message.author.id):
+            if not user_data.is_known(message.author.id):
                 should_process = await dm_approval.process_dm(message, self.bot)
                 if not should_process:
                     return
@@ -870,7 +878,7 @@ class BongCog(commands.Cog):
 
                 # Set up shared state for this message's tool loop
                 await update_voice_state(guild, message.author.id)
-                bong_tools.authorized = dm_approval.is_authorized(message.author.id)
+                bong_tools.authorized = user_data.is_authorized(message.author.id)
                 bong_tools.current_user_id = message.author.id
                 bong_tools.current_username = message.author.display_name
 
@@ -898,7 +906,7 @@ class BongCog(commands.Cog):
 
                 # Handle shutdown if the LLM called the shutdown tool
                 if bong_tools.pending_shutdown:
-                    if dm_approval.is_admin(message.author.id):
+                    if user_data.is_admin(message.author.id):
                         await message.add_reaction("🫡")
                         await self.bot.close()
                     else:
@@ -915,7 +923,7 @@ class BongCog(commands.Cog):
     @commands.command(name="llm", help="Toggle Bong's activity in the current channel")
     async def llm(self, ctx):
         """Toggle Bong's activity in the current channel. Only admin and authorized users can use this."""
-        if not dm_approval.is_authorized(ctx.author.id):
+        if not user_data.is_authorized(ctx.author.id):
             await ctx.send("You are not authorized to use this command.")
             return
         if ctx.channel.id in active_channels:
