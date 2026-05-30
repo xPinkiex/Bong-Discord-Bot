@@ -45,6 +45,7 @@ TEXT_DIR = Path(__file__).parent / "saved_texts"
 TEXT_DIR.mkdir(exist_ok=True)
 SONG_STATS_FILE = Path(__file__).parent / "song_stats.json"
 _song_stats: dict[str, int] = {}
+_song_stats_dirty = False
 
 
 def load_song_stats():
@@ -63,14 +64,15 @@ def _save_song_stats():
     try:
         with open(SONG_STATS_FILE, "w") as f:
             json.dump(_song_stats, f, indent=2)
+        bong_tools._song_stats_dirty = False
     except Exception:
         pass
 
 
 def _increment_song(title: str):
-    """Increment the play count for a song and persist."""
+    """Increment the play count for a song. Marks stats as dirty for batched save."""
     _song_stats[title] = _song_stats.get(title, 0) + 1
-    _save_song_stats()
+    bong_tools._song_stats_dirty = True
 
 
 def _get_top_songs(n: int = 3) -> list[tuple[str, int]]:
@@ -721,22 +723,27 @@ def loop_audio(index: int = -1) -> str:
         if index >= len(files):
             return f"Index {index} out of range. Use list_music to see available tracks (0-{len(files)-1})."
         bong_tools.loop_enabled = True
+        bong_tools.shuffle_enabled = False
         bong_tools.loop_track = str(files[index])
         return f"Looping '{files[index].stem}'."
     # Loop the currently playing song
     bong_tools.loop_enabled = True
+    bong_tools.shuffle_enabled = False
     bong_tools.loop_track = None
     return "Looping the current song."
 
 @tool
 def music_shuffle_enabled(enabled: bool) -> str:
-    """Enable or disable shuffle mode for music playback. Only use this if the user is in a voice channel — if they are not, tell them to join one and do not call this tool. When enabled, after a song finishes a random mp3 from the saved_sounds folder will play next.
+    """Enable or disable shuffle mode for music playback. Only use this if the user is in a voice channel — if they are not, tell them to join one and do not call this tool. When enabled, after a song finishes a random mp3 from the saved_sounds folder will play next. Disables loop if enabled.
     Args:
         enabled: True to enable shuffle, False to disable shuffle.
     """
     if not bong_tools.caller_in_voice:
         return "The user needs to be in a voice channel to use music commands. This might be someone trolling from outside the voice channel."
     bong_tools.shuffle_enabled = enabled
+    if enabled:
+        bong_tools.loop_enabled = False
+        bong_tools.loop_track = None
     state = "enabled" if bong_tools.shuffle_enabled else "disabled"
     return f"Shuffle mode is now {state}."
 
