@@ -16,6 +16,7 @@ A Discord bot with a furry protogen personality, powered by a local LLM (Ollama)
 - **Bot Stats** — Uptime, memory count, known users, reminders, top 3 most-played songs
 - **Hot Reload** — `@reload` command refreshes code without restarting (owner only)
 - **Image/Text Sharing** — Send saved images and text files in chat
+- **Voice Commands** — Wake word detection ("hey bong") via custom openWakeWord model, Whisper transcription, LLM processing in voice channel text chat
 - **Web Search** — DuckDuckGo search and YouTube search
 
 ## Architecture
@@ -24,6 +25,7 @@ A Discord bot with a furry protogen personality, powered by a local LLM (Ollama)
 main.py              Bot entry point, @reload command, on_ready init
 bong.py              Discord cog — message handling, LLM loop, voice dispatch, DM approval
 bong_tools.py        LangChain @tool definitions and shared state (pending_* flags)
+voice_commands.py    Voice command pipeline — BongVoiceSink, wake word detection, Whisper STT
 user_data.py         Per-user settings (tier, timezone) persisted to users.json
 dm_approval.py       DM approval flow with Discord button UI
 reminders.py         Reminder persistence and time-delta parsing
@@ -37,6 +39,7 @@ debug.py             Logging utility
 3. Tools in `bong_tools.py` are **synchronous** — they write to `pending_*` flags
 4. After the LLM loop, the cog **dispatches** pending actions asynchronously (join voice, play audio, send files, deliver reminders)
 5. The `after_play` callback auto-advances through the song queue
+6. Voice commands use a two-stage pipeline: lightweight openWakeWord detects "hey bong", then Whisper transcribes the command for LLM processing
 
 ### Data Files (gitignored)
 
@@ -46,6 +49,8 @@ debug.py             Logging utility
 | `reminders.json` | Pending reminders |
 | `song_stats.json` | Song play counts |
 | `chroma_db/` | ChromaDB vector store for memories |
+| `whisper_models/` | Cached whisper STT model |
+| `wakeword_models/` | Custom wake word models (hey_bong.onnx tracked) |
 | `saved_sounds/` | Downloaded mp3 files |
 | `saved_images/` | Saved images |
 | `saved_texts/` | Saved text files |
@@ -64,8 +69,8 @@ debug.py             Logging utility
 ### Install
 
 ```bash
-git clone https://github.com/xPinkiex/Python-Discord-Bot.git
-cd Python-Discord-Bot
+git clone https://github.com/xPinkiex/Bong-Discord-Bot.git
+cd Bong-Discord-Bot
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
@@ -112,6 +117,7 @@ python main.py
 | `forget_memory` | Delete a memory |
 | `set_reminder` / `cancel_reminder` / `list_reminders_tool` | Reminders via DM |
 | `bot_stats` | Show uptime, memories, users, song stats |
+| `start_listening` / `stop_listening` | Enable/disable voice commands in current VC |
 | `shutdown` | Shut down the bot (authorized users only) |
 
 ## Hot Reload
@@ -123,7 +129,7 @@ Use `@reload` in Discord (owner only) to hot-reload `bong`, `bong_tools`, `dm_ap
 | Tier | Abilities |
 |---|---|
 | **Admin** | Shut down bot, full access to all tools |
-| **Authorized** | LLM commands, music, reminders, memory |
+| **Authorized** | LLM commands, music, reminders, memory, voice commands |
 | **User** | Basic chat access (approved via DM flow) |
 
 Unknown users who DM Bong trigger an approval request sent to the owner with role-selection buttons.
