@@ -3,8 +3,13 @@
 # This file sets up the discord.py bot, loads the Bong cog, and provides
 # owner-only commands for hot-reloading extensions, toggling debug mode,
 # and shutting down the bot.
+#
+# Usage: python main.py [-d|--debug]
+#   -d, --debug    Enable debug logging (console + file)
 
+import argparse
 import discord
+import asyncio
 import os
 import sys
 import types
@@ -13,6 +18,13 @@ from datetime import datetime
 from dotenv import load_dotenv
 from discord.ext import commands
 import debug
+
+parser = argparse.ArgumentParser(description="Bong Discord Bot")
+parser.add_argument("-d", "--debug", action="store_true", help="Enable debug logging")
+args = parser.parse_args()
+
+if args.debug:
+    debug.toggle_debug(True)
 
 # Load environment variables from .env file (DISCORD_TOKEN, etc.)
 load_dotenv()
@@ -29,6 +41,7 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="@", case_insensitive=True, intents=intents)
 
+
 @bot.event
 async def on_ready():
     """Called when the bot connects to Discord and is ready to receive events."""
@@ -44,6 +57,17 @@ async def on_ready():
     user_data.load_users()
     reminders.load_reminders()
     debug.log("Bot", f'Bot logged in as {bot.user}')
+    bot.loop.create_task(_setup_debugging())
+
+
+async def _setup_debugging():
+    """Debug: auto-join a voice channel, enable VC commands, etc. on startup.
+    Edit the function body to configure what runs at startup.
+    Set _DEBUG_SETUP_ENABLED = False to disable.
+    """
+    _DEBUG_SETUP_ENABLED = False
+    if not _DEBUG_SETUP_ENABLED:
+        return
 
 @bot.command(name='reload')
 @commands.is_owner()
@@ -59,14 +83,31 @@ async def reload_ext(ctx, util: str = "bong"):
     Only the bot owner can use this command.
     """
     try:
+        # Stop all active voice listeners before reload — their sink objects
+        # hold references to the old bot/guild/loop that won't survive the reload
+        import voice_commands as _vc_pre
+        for gid in list(_vc_pre._active_listeners):
+            try:
+                sink = _vc_pre._active_listeners[gid]
+                sink._stopped = True
+                if sink._silence_task and not sink._silence_task.done():
+                    sink._silence_task.cancel()
+            except Exception:
+                pass
+        _vc_pre._active_listeners.clear()
+        _vc_pre._is_listening.clear()
+
         # Snapshot and restore mutable state across all related modules
         # so runtime state (shuffle, current track, pending flags, etc.) survives the reload
+        # Skip _active_listeners and _is_listening from voice_commands — they hold stale references
+        _skip_attrs = {"voice_commands": {"_active_listeners", "_is_listening"}}
         snapshots = {}
-        for mod in [util, util + "_tools", "debug", "dm_approval", "reminders", "user_data"]:
+        for mod in [util, util + "_tools", "debug", "dm_approval", "reminders", "user_data", "voice_commands"]:
             if mod in sys.modules:
+                skip = _skip_attrs.get(mod, set())
                 # Save all non-function, non-module, non-class attributes (i.e. runtime state)
                 snapshots[mod] = {k: getattr(sys.modules[mod], k) for k in dir(sys.modules[mod])
-                    if not k.startswith("__") and not isinstance(getattr(sys.modules[mod], k), (types.FunctionType, types.ModuleType, type))}
+                    if not k.startswith("__") and k not in skip and not isinstance(getattr(sys.modules[mod], k), (types.FunctionType, types.ModuleType, type))}
                 importlib.reload(sys.modules[mod])
                 # Restore the saved state into the reloaded module
                 for k, v in snapshots[mod].items():
@@ -141,16 +182,14 @@ async def poweroff(ctx):
 
 @bot.command(name='debug', help="Toggle debug mode")
 @commands.is_owner()
-async def toggle_debug(ctx, enabled: bool | None = None):
+async def toggle_debug_cmd(ctx, enabled: bool | None = None):
     """Toggle or set debug mode. Only the bot owner can use this.
     
     With no argument, toggles debug mode on/off.
     With True or False, explicitly sets it.
     """
-    if enabled is None:
-        enabled = not debug.toggle_debug()
-    debug.toggle_debug(enabled)
-    await ctx.send(f"Debug mode {'enabled' if enabled else 'disabled'}")
+    new_state = debug.toggle_debug(enabled)
+    await ctx.send(f"Debug mode {'enabled' if new_state else 'disabled'}")
 
 # Start the bot — this blocks until bot.close() is called
 bot.run(TOKEN)

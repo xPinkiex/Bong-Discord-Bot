@@ -13,6 +13,7 @@ import asyncio
 import base64
 import random
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 import httpx
@@ -29,6 +30,7 @@ import debug
 import dm_approval
 import reminders
 import user_data
+import voice_commands
 
 # --- LLM Models ---
 # The classifier model is fast and cheap — it only needs to output YES/NO
@@ -54,6 +56,9 @@ MAX_SUMMARIES_PER_CHANNEL = 5
 SUMMARIZE_CHUNK_SIZE = 10
 # Set of channel IDs where Bong is currently active (toggled with the @llm command)
 active_channels = set()
+# Per-user cooldown for voice commands (user_id -> timestamp of last processed command)
+_voice_cooldowns: dict[int, float] = {}
+VOICE_COOLDOWN_SECONDS = 5
 
 # Permission tiers are managed in dm_approval (users.json + OWNER_ID)
 # - admin:     full access (shutdown, @llm, DMs)
@@ -61,7 +66,7 @@ active_channels = set()
 # - user:      chatting + tools, no @llm or shutdown
 
 # Channels whose history is automatically loaded on startup so Bong has context immediately
-DEBUG_CHANNEL_IDS = [698924302594211883]
+DEBUG_CHANNEL_IDS = [ 698924302594211883, 698633099591942199 ]
 
 # Load the system prompt and classifier prompt from template files
 TEMPLATE_DIR = Path(__file__).parent / "Response Templates"
@@ -102,7 +107,7 @@ async def invoke_with_retry(model, messages, max_retries=LLM_MAX_RETRIES):
             if attempt >= max_retries:
                 raise
             delay = LLM_RETRY_DELAYS[attempt] if attempt < len(LLM_RETRY_DELAYS) else LLM_RETRY_DELAYS[-1]
-            debug.log("AI", f"LLM timeout/connection error (attempt {attempt + 1}/{max_retries + 1}), retrying in {delay}s: {e}")
+            debug.error("AI", f"LLM timeout/connection error (attempt {attempt + 1}/{max_retries + 1}), retrying in {delay}s: {e}")
             await asyncio.sleep(delay)
         except Exception:
             raise
@@ -198,6 +203,8 @@ def build_voice_status(guild):
             voice_status = f"Connected to voice channel '{vc.channel.name}'. Do NOT use join_voice — you are already in voice."
             if bong_tools.current_track and (vc.is_playing() or vc.is_paused()):
                 voice_status += f"\nCurrently playing '{Path(bong_tools.current_track).stem}'."
+            if voice_commands.is_listening(guild.id):
+                voice_status += "\nVoice command listener is ACTIVE — listening for 'hey bong' wake word."
         else:
             voice_status = "Not in any voice channel."
     else:
@@ -457,10 +464,11 @@ async def run_tool_loop(bound_model, messages, image_attachments, text_attachmen
             tool_args = tc["args"]
             debug.log("AI", f"Tool call: {tool_name}({tool_args})")
             debug.log_to_file("AI", f"TOOL CALL: {tool_name}({tool_args})")
-            last_prompt_path.write_text(
-                last_prompt_path.read_text(encoding="utf-8") + f"\nTOOL CALL: {tool_name}({tool_args})\n",
-                encoding="utf-8",
-            )
+            if last_prompt_path:
+                last_prompt_path.write_text(
+                    last_prompt_path.read_text(encoding="utf-8") + f"\nTOOL CALL: {tool_name}({tool_args})\n",
+                    encoding="utf-8",
+                )
 
             tool_result = await dispatch_tool(tool_name, tool_args, image_attachments, text_attachments)
             # Feed the tool result back to the LLM as a ToolMessage
@@ -470,10 +478,11 @@ async def run_tool_loop(bound_model, messages, image_attachments, text_attachmen
             summary_args = ', '.join(str(v) for v in tool_args.values())
             tool_summaries.append(f"{tool_name}({summary_args})")
             debug.log_to_file("AI", f"TOOL RESULT ({tool_name}): {tool_result}")
-            last_prompt_path.write_text(
-                last_prompt_path.read_text(encoding="utf-8") + f"TOOL RESULT ({tool_name}): {tool_result}\n",
-                encoding="utf-8",
-            )
+            if last_prompt_path:
+                last_prompt_path.write_text(
+                    last_prompt_path.read_text(encoding="utf-8") + f"TOOL RESULT ({tool_name}): {tool_result}\n",
+                    encoding="utf-8",
+                )
 
         # Re-invoke the LLM with the tool results so it can decide what to do next
         ai_response = await invoke_with_retry(bound_model, messages)
@@ -489,10 +498,11 @@ async def run_tool_loop(bound_model, messages, image_attachments, text_attachmen
         result_text = _extract_response_text(retry_response)
 
     debug.log("AI", "Generating final response")
-    last_prompt_path.write_text(
-        last_prompt_path.read_text(encoding="utf-8") + f"\nFINAL RESPONSE:\n{result_text}\n",
-        encoding="utf-8",
-    )
+    if last_prompt_path:
+        last_prompt_path.write_text(
+            last_prompt_path.read_text(encoding="utf-8") + f"\nFINAL RESPONSE:\n{result_text}\n",
+            encoding="utf-8",
+        )
 
     return result_text, tool_summaries
 
@@ -586,7 +596,12 @@ async def _dispatch_join_voice(guild):
         target_member = guild.get_member(bong_tools.pending_join_voice)
         if target_member and target_member.voice and target_member.voice.channel:
             try:
-                await target_member.voice.channel.connect()
+                # If voice commands are active, use VoiceRecvClient to maintain receive capability
+                if voice_commands.is_listening(guild.id):
+                    from discord.ext.voice_recv import VoiceRecvClient
+                    await target_member.voice.channel.connect(cls=VoiceRecvClient)
+                else:
+                    await target_member.voice.channel.connect()
                 debug.log("AI", f"Joined voice channel: {target_member.voice.channel.name}")
             except Exception as e:
                 debug.log("AI", f"Failed to join voice channel: {e}")
@@ -606,6 +621,8 @@ async def _dispatch_leave_voice(guild):
         return None
     error = None
     if guild and guild.voice_client:
+        # Stop voice command listener before disconnecting
+        await voice_commands.stop_listening(guild)
         await _set_voice_status(guild, None)
         try:
             await guild.voice_client.disconnect()
@@ -738,7 +755,50 @@ async def _dispatch_skip_audio(guild):
     return None
 
 
-async def dispatch_voice_actions(guild, message):
+async def _dispatch_start_listening(guild, bot):
+    """Handle pending_start_listening flag. Starts the voice command listener."""
+    if not bong_tools.pending_start_listening:
+        return None
+    bong_tools.pending_start_listening = None
+
+    if not guild:
+        return "Cannot start voice commands in DMs."
+
+    channel_id = bong_tools.current_channel_id
+    text_channel = None
+    if channel_id:
+        text_channel = guild.get_channel(channel_id)
+        if not text_channel:
+            text_channel = bot.get_channel(channel_id)
+
+    result = await voice_commands.start_listening(bot, guild, text_channel)
+    if result:
+        debug.log("AI", f"Voice cmd listener: {result}")
+        if result.startswith("Listening"):
+            return None
+        return result
+    return None
+
+
+async def _dispatch_stop_listening(guild):
+    """Handle pending_stop_listening flag. Stops the voice command listener."""
+    if not bong_tools.pending_stop_listening:
+        return None
+    bong_tools.pending_stop_listening = False
+
+    if not guild:
+        return "Cannot stop voice commands in DMs."
+
+    result = await voice_commands.stop_listening(guild)
+    if result:
+        debug.log("AI", f"Voice cmd listener: {result}")
+        if result.startswith("Stopped"):
+            return None
+        return result
+    return None
+
+
+async def dispatch_voice_actions(guild, message, bot=None):
     """Dispatch all pending voice/audio/file-send actions in order.
     
     Order matters: join before play, stop/skip before play, etc.
@@ -760,6 +820,15 @@ async def dispatch_voice_actions(guild, message):
         results = []
         for fn in voice_dispatchers:
             results.append(await fn(guild))
+
+        # Dispatch voice command listener
+        if bot:
+            start_result = await _dispatch_start_listening(guild, bot)
+            stop_result = await _dispatch_stop_listening(guild)
+            if start_result:
+                results.append(start_result)
+            if stop_result:
+                results.append(stop_result)
 
         # Update voice channel status after all dispatchers have run
         # (catches loop/shuffle toggles, play, stop, etc.)
@@ -798,7 +867,7 @@ async def dispatch_voice_actions(guild, message):
 
     except Exception as e:
         debug.log("AI", f"Error during voice/audio dispatch: {e}")
-        debug.log_to_file("AI", f"Error during voice/audio dispatch: {e}")
+        debug.error("AI", f"Error during voice/audio dispatch: {e}")
         # Force-disconnect the voice client on error to reset the Opus state
         if guild and guild.voice_client:
             try:
@@ -858,6 +927,118 @@ def record_passive_message(history, message, attachment_desc):
     if len(history) >= MAX_MEMORY_SIZE:
         history.pop()
     debug.log("AI", f"remembered {len(history)}")
+
+
+async def process_voice_command(bot, guild, channel, user_id: int, username: str, text: str):
+    """Process a transcribed voice command through Bong's LLM pipeline.
+
+    This is called by voice_commands.py when a wake word is detected.
+    It mimics the on_message pipeline but with a synthesized message.
+    """
+    if channel is None:
+        debug.log("VoiceCmd", f"Cannot process voice command: no text channel (user={user_id})")
+        return
+
+    # Per-user cooldown to prevent rapid overlapping voice commands
+    now = time.time()
+    last_cmd = _voice_cooldowns.get(user_id, 0)
+    if now - last_cmd < VOICE_COOLDOWN_SECONDS:
+        debug.log("VoiceCmd", f"Cooldown: user {user_id} sent voice command too quickly ({now - last_cmd:.1f}s < {VOICE_COOLDOWN_SECONDS}s)")
+        return
+    _voice_cooldowns[user_id] = now
+    if len(_voice_cooldowns) > 20:
+        oldest = sorted(_voice_cooldowns, key=lambda k: _voice_cooldowns[k])[:len(_voice_cooldowns) - 20]
+        for k in oldest:
+            del _voice_cooldowns[k]
+
+    try:
+        history = chat_memories.setdefault(channel.id, [])
+        voice_status_str = "Not in any voice channel."
+        if guild and guild.voice_client and guild.voice_client.is_connected():
+            vc = guild.voice_client
+            voice_status_str = f"Connected to voice channel '{vc.channel.name}'."
+            if bong_tools.current_track and (vc.is_playing() or vc.is_paused()):
+                voice_status_str += f"\nCurrently playing '{Path(bong_tools.current_track).stem}'."
+        if guild and voice_commands.is_listening(guild.id):
+            voice_status_str += "\nVoice command listener is ACTIVE — listening for 'hey bong' wake word."
+
+        # Build the system prompt using a synthetic approach
+        memories_str = bong_tools.retrieve_memories(f"{username}: {text}", username=username, user_id=user_id)
+        summaries = channel_summaries.get(channel.id, [])
+        summaries_str = ""
+        if summaries:
+            summaries_str = "\n\nThe older conversation above has been summarized for context. These are compressed versions of what was discussed before the chat history you can see:\n" + "\n".join(f"- {s}" for s in summaries)
+
+        system_msg_content = prompt_template.replace("{username}", username).replace("{userID}", str(user_id)).replace("{message}", text).replace("{voice_status}", voice_status_str).replace("{attachments}", "").replace("{history}", "\n".join(history)).replace("{reply_context}", "").replace("{memories}", memories_str).replace("{summaries}", summaries_str)
+
+        messages = [HumanMessage(content=system_msg_content)]
+
+        last_prompt_path = Path(__file__).parent / "logs" / "last_prompt.log" if debug.is_debug() else None
+        if last_prompt_path:
+            last_prompt_path.parent.mkdir(parents=True, exist_ok=True)
+            last_prompt_path.write_text(system_msg_content + "\n\n========\n", encoding="utf-8")
+        debug.log_to_file("AI", f"VOICE COMMAND from {username} ({user_id}): {text}")
+
+        # Set up shared state for this invocation
+        await update_voice_state(guild, user_id)
+        bong_tools.authorized = user_data.is_authorized(user_id)
+        bong_tools.current_user_id = user_id
+        bong_tools.current_username = username
+        bong_tools.current_channel_id = channel.id
+
+        bound_model = base_model.bind_tools(bong_tools.tools)
+        result, tool_summaries = await run_tool_loop(bound_model, messages, [], [], last_prompt_path)
+
+        # Voice commands have no Discord message to react to, so discard any pending reactions
+        bong_tools.pending_reactions.clear()
+
+        # Record in history
+        history_entry = f"{username} at {datetime.now().strftime('%H:%M')} (voice): {text}\nBong's response: {result.replace(chr(10), '. ')}"
+        if len(history) >= MAX_MEMORY_SIZE:
+            history.pop()
+        history.insert(0, history_entry)
+        debug.log("AI", f"voice response recorded {len(history)}")
+
+        # Dispatch voice actions — for voice commands we pass the text channel
+        # directly since there's no Discord message object
+        voice_error = None
+        if guild:
+            # Create a minimal namespace for dispatch_voice_actions
+            # that has a .channel attribute pointing to our text channel
+            class _FakeMessage:
+                def __init__(self, ch):
+                    self.channel = ch
+            voice_error = await dispatch_voice_actions(guild, _FakeMessage(channel), bot=bot)
+
+        # Send response to text channel
+        if voice_error:
+            messages.append(HumanMessage(content=f"System: The voice/audio action failed with this error: {voice_error}. Please let the user know and suggest what they can do."))
+            error_response = await invoke_with_retry(bound_model, messages)
+            error_text = _extract_response_text(error_response)
+            await send_chunked(channel, error_text)
+        else:
+            await send_chunked(channel, result)
+        debug.log("VoiceCmd", f"Voice command processed: {text[:50]}...")
+
+        if bong_tools.pending_shutdown:
+            if user_data.is_admin(user_id):
+                if guild and guild.voice_client and guild.voice_client.channel:
+                    await _set_voice_status(guild, None)
+                await channel.send("🫡")
+                await bot.close()
+            else:
+                debug.log("VoiceCmd", "Unauthorized shutdown attempt")
+            bong_tools.pending_shutdown = False
+
+    except Exception as e:
+        debug.log("VoiceCmd", f"Error processing voice command: {e}")
+        debug.error("VoiceCmd", f"Error processing voice command: {e}")
+        debug.log_to_file("VoiceCmd", f"Error processing voice command: {e}")
+        bong_tools.reset_pending()
+        try:
+            await channel.send("Something went wrong processing that voice command. Try again?")
+        except Exception:
+            pass
 
 
 class BongCog(commands.Cog):
@@ -1042,8 +1223,10 @@ class BongCog(commands.Cog):
                 messages = [HumanMessage(content=system_msg)]
 
                 # Write the full prompt to the log file for debugging
-                last_prompt_path = Path(__file__).parent / "logs" / "last_prompt.log"
-                last_prompt_path.write_text(system_msg + "\n\n========\n", encoding="utf-8")
+                last_prompt_path = Path(__file__).parent / "logs" / "last_prompt.log" if debug.is_debug() else None
+                if last_prompt_path:
+                    last_prompt_path.parent.mkdir(parents=True, exist_ok=True)
+                    last_prompt_path.write_text(system_msg + "\n\n========\n", encoding="utf-8")
 
                 debug.log_to_file("AI", f"QUERY from {message.author.display_name} ({message.author.id}): {message.content}")
 
@@ -1052,6 +1235,7 @@ class BongCog(commands.Cog):
                 bong_tools.authorized = user_data.is_authorized(message.author.id)
                 bong_tools.current_user_id = message.author.id
                 bong_tools.current_username = message.author.display_name
+                bong_tools.current_channel_id = message.channel.id
 
                 # Bind tools to a fresh model instance for this request
                 bound_model = base_model.bind_tools(bong_tools.tools)
@@ -1064,7 +1248,7 @@ class BongCog(commands.Cog):
                 record_history(history, message, result, attachment_desc, tool_summaries)
 
                 # Dispatch all pending voice/audio/file actions
-                voice_error = await dispatch_voice_actions(guild, message)
+                voice_error = await dispatch_voice_actions(guild, message, bot=self.bot)
 
                 # If a voice action failed, ask the LLM to explain the error to the user
                 if voice_error:
@@ -1089,6 +1273,7 @@ class BongCog(commands.Cog):
 
             except Exception as e:
                 debug.log("AI", f"Error generating response: {e}")
+                debug.error("AI", f"Error generating response: {e}")
                 debug.log_to_file("AI", f"Error generating response: {e}")
                 # Clear all pending state so it doesn't leak into the next message
                 bong_tools.reset_pending()

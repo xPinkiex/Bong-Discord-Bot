@@ -359,10 +359,15 @@ pending_skip_info = ""       # Human-readable name of the skip target track
 pending_send_image = None    # File path to send as an image attachment
 pending_send_text = None     # File path to send as a text file attachment
 
+# --- Voice command state ---
+pending_start_listening = None   # user_id — start voice command listener (channel derived from current_channel_id)
+pending_stop_listening = False   # Flag — stop voice command listener
+
 # --- Voice/music state (set by the cog before each tool loop) ---
 voice_connected = False   # True if bot is currently in a voice channel
 caller_in_voice = False   # True if the user who sent the message is in a voice channel
 current_user_id = None    # Discord user ID of the user who sent the current message
+current_channel_id = None  # Discord channel ID of the current message (set by cog)
 
 # --- Authorization and playback state ---
 authorized = False        # Whether the current user has admin or authorized tier (set by cog)
@@ -390,6 +395,8 @@ def reset_pending():
     bong_tools.pending_skip_info = ""
     bong_tools.pending_send_image = None
     bong_tools.pending_send_text = None
+    bong_tools.pending_start_listening = None
+    bong_tools.pending_stop_listening = False
 
 
 # --- File library caches ---
@@ -1185,8 +1192,31 @@ def shutdown() -> str:
     bong_tools.pending_shutdown = True
     return "Shutting down"
 
+# --- Voice command tools ---
+
+@tool
+def start_listening(userID: int) -> str:
+    """Start listening for voice commands in the voice channel. The bot will listen for the wake word 'hey bong' and process voice commands from authorized users. Only use this if the user is authorized and the bot is already in a voice channel — if not in a voice channel, tell the user to join one and have the bot join first. Do NOT call this more than once per conversation turn.
+    Args:
+        userID: The Discord user ID of the person who wants to start voice commands (used to confirm authorization).
+    """
+    if not bong_tools.authorized:
+        return "Cannot start listening: the user is not authorized for voice commands. Only authorized and admin users can use this feature."
+    if bong_tools.pending_start_listening is not None:
+        return "Voice command listener is already being started. Do not call this tool again."
+    bong_tools.pending_start_listening = userID
+    return "Starting voice command listener"
+
+@tool
+def stop_listening() -> str:
+    """Stop listening for voice commands in the voice channel. Use this when the user wants to disable voice command mode. Only use this if the user is authorized."""
+    if not bong_tools.authorized:
+        return "Cannot stop listening: the user is not authorized. Only authorized and admin users can use this feature."
+    bong_tools.pending_stop_listening = True
+    return "Stopping voice command listener"
+
 # All tools the model can call — this list is bound to the LLM so it knows what's available
-tools = [react, describe_image, read_text_file, join_voice, leave_voice, current_time, web_search, youtube_search, download_music, list_music, search_music, play_audio, loop_audio, pause_audio, resume_audio, stop_audio, skip_audio, music_shuffle_enabled, queue, clear_queue, list_images, send_image, list_texts, send_text, save_memory, recall_memories_by_userid, recall_memories_general, forget_memory, set_reminder, cancel_reminder, list_reminders_tool, set_timezone, get_timezone, summarize_url, bot_stats, shutdown]
+tools = [react, describe_image, read_text_file, join_voice, leave_voice, current_time, web_search, youtube_search, download_music, list_music, search_music, play_audio, loop_audio, pause_audio, resume_audio, stop_audio, skip_audio, music_shuffle_enabled, queue, clear_queue, list_images, send_image, list_texts, send_text, save_memory, recall_memories_by_userid, recall_memories_general, forget_memory, set_reminder, cancel_reminder, list_reminders_tool, set_timezone, get_timezone, summarize_url, bot_stats, shutdown, start_listening, stop_listening]
 
 # Lookup dict from tool name to tool function — used by dispatch_tool in bong.py
 tool_map = {t.name: t for t in tools}

@@ -1,5 +1,6 @@
 discord.py[voice]>=2.0.0
 PyNaCl>=1.5.0
+discord-ext-voice-recv @ git+https://github.com/vocolboy/discord-ext-voice-recv.git
 davey>=0.1.0
 python-dotenv>=1.0.0
 langchain
@@ -7,3 +8,6 @@ langchain-ollama
 langchain-chroma
 ddgs
 yt-dlp
+faster-whisper>=1.0.0
+openwakeword>=0.4.0
+numpy
