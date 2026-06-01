@@ -37,7 +37,7 @@ _WHISPER_MODEL_SIZE = "small"
 _WHISPER_DOWNLOAD_ROOT = str(Path(__file__).parent / "whisper_models")
 
 _oww_model = None
-_OWW_WAKE_WORD = "hey_jarvis_v0.1"
+_OWW_WAKE_WORD = "hey_bong"
 _OWW_THRESHOLD = 0.5
 
 
@@ -59,14 +59,19 @@ def _load_models():
             import warnings
             warnings.filterwarnings("ignore", message="Specified provider.*not in available")
             from openwakeword.model import Model
-            import openwakeword
-            oww_file = openwakeword.__file__
-            if oww_file is None:
-                raise RuntimeError("Cannot locate openwakeword package directory")
-            model_dir = Path(oww_file).parent / "resources" / "models"
-            model_path = model_dir / "hey_jarvis_v0.1.onnx"
-            _vlog("Loading openWakeWord model...")
-            _oww_model = Model(wakeword_model_paths=[str(model_path)], vad_threshold=0.5)
+            custom_model = Path(__file__).parent / "wakeword_models" / "hey_bong.onnx"
+            if custom_model.exists():
+                _vlog(f"Loading custom openWakeWord model ({custom_model})...")
+                _oww_model = Model(wakeword_model_paths=[str(custom_model)], vad_threshold=0.5)
+            else:
+                import openwakeword
+                oww_file = openwakeword.__file__
+                if oww_file is None:
+                    raise RuntimeError("Cannot locate openwakeword package directory")
+                model_dir = Path(oww_file).parent / "resources" / "models"
+                model_path = model_dir / "hey_jarvis_v0.1.onnx"
+                _vlog("Loading fallback openWakeWord model...")
+                _oww_model = Model(wakeword_model_paths=[str(model_path)], vad_threshold=0.5)
             _vlog("openWakeWord model loaded")
 
 
@@ -339,8 +344,8 @@ class BongVoiceSink(AudioSink):
             command_text = text[wake_word_idx + len(WAKE_WORD):].strip()
             command_text = command_text.lstrip(",.!?;: ")
         else:
-            # openWakeWord detected "hey jarvis" but Whisper may transcribe differently
-            for wake_prefix in ("hey jarvis, ", "hey jarvis ", "jarvis, ", "jarvis "):
+            # openWakeWord detected "hey bong" but Whisper may transcribe differently
+            for wake_prefix in ("hey bong, ", "hey bong ", "bong, ", "bong "):
                 if text_lower.startswith(wake_prefix):
                     command_text = text[len(wake_prefix):]
                     break

@@ -23,6 +23,7 @@ Bong Bot Todo
 - [x] Reminders at specific day/time — timezone-aware with parse_absolute_time
 - [x] User cooldown (60s for regular users, admin/authorized bypass)
 - [x] Unit tests for cooldown, deduplication, and reminder parsing
+- [x] Voice commands module — faster-whisper STT, wake word "hey bong", authorized+ only, voice_commands.py with BongVoiceSink
 
 ## Backlog
 - [ ] Per-tool call limit — allow only X runs of a specific tool in a single tool loop chain
@@ -31,4 +32,4 @@ Bong Bot Todo
 - [ ] Bong-controlled shuffle — LLM picks next song based on conversation context
 - [ ] Playlist support — save/load named playlists from JSON
 - [ ] Rate limiting on tools — prevent spamming web_search, download_music, etc.
-- [ ] Voice wake word + transcription — openWakeWord for "Hey Bong" detection, Whisper transcription, skip classifier (wake word = intent), respond in VC text channel, add transcription to chat history
+- [ ] Voice commands polish — respond in VC text channel, skip classifier on wake word, test different whisper model sizes

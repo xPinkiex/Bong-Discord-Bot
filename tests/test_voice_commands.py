@@ -123,7 +123,7 @@ class TestWakeWordDetection:
                 mock_process.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_jarvis_wake_word_stripped(self):
+    async def test_bong_wake_word_stripped(self):
         sink = BongVoiceSink(MagicMock(), MagicMock(), MagicMock(), MagicMock())
         sink.guild = MagicMock()
 
@@ -133,7 +133,7 @@ class TestWakeWordDetection:
 
         with patch('voice_commands.user_data.is_authorized', return_value=True):
             with patch('bong.process_voice_command', side_effect=mock_process):
-                await sink._handle_transcription(222, "hey jarvis, play music")
+                await sink._handle_transcription(222, "hey bong, play music")
 
         assert len(calls) == 1
         assert calls[0] == "play music"
