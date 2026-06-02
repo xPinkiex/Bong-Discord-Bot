@@ -23,20 +23,27 @@ import wave
 from collections import defaultdict
 from pathlib import Path
 from threading import Lock
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+BONG_DATA = PROJECT_ROOT / "bong_data"
+BONG_USER_DATA = PROJECT_ROOT / "bong_user_data"
 
 import numpy as np
 import debug
 import user_data
 
-_LOG_FILE = Path(__file__).parent / "logs" / "voice_commands.log"
-_DEBUG_WAV_DIR = Path(__file__).parent / "logs" / "voice_debug"
+_LOG_FILE = BONG_DATA / "logs" / "voice_commands.log"
+_DEBUG_WAV_DIR = BONG_DATA / "logs" / "voice_debug"
 _MAX_DEBUG_WAVS = 10
 
 _model_lock = Lock()
 
 _whisper_model = None
 _WHISPER_MODEL_SIZE = "small"
-_WHISPER_DOWNLOAD_ROOT = str(Path(__file__).parent / "whisper_models")
+_WHISPER_DOWNLOAD_ROOT = str(BONG_DATA / "whisper_models")
 
 _oww_model = None
 _OWW_WAKE_WORD = "hey_bong"
@@ -63,7 +70,7 @@ def _load_models():
             import warnings
             warnings.filterwarnings("ignore", message="Specified provider.*not in available")
             from openwakeword.model import Model
-            custom_model = Path(__file__).parent / "wakeword_models" / "hey_bong.onnx"
+            custom_model = BONG_DATA / "wakeword_models" / "hey_bong.onnx"
             if custom_model.exists():
                 _vlog(f"Loading custom openWakeWord model ({custom_model})...")
                 _oww_model = Model(wakeword_model_paths=[str(custom_model)], vad_threshold=0.5)

@@ -10,8 +10,15 @@ from datetime import datetime, timedelta
 from typing import Optional
 from pathlib import Path
 from dataclasses import dataclass, asdict
+import sys
 
-_REMINDERS_FILE = Path(__file__).parent / "reminders.json"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+BONG_DATA = PROJECT_ROOT / "bong_data"
+BONG_USER_DATA = PROJECT_ROOT / "bong_user_data"
+
+_REMINDERS_FILE = BONG_USER_DATA / "reminders.json"
 
 # In-memory list of active reminders
 reminders: list[dict] = []

@@ -17,6 +17,13 @@ import time
 from datetime import datetime
 from pathlib import Path
 import httpx
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+BONG_DATA = PROJECT_ROOT / "bong_data"
+BONG_USER_DATA = PROJECT_ROOT / "bong_user_data"
 
 # discord.py's command framework — this file is loaded as a "cog" (plugin)
 from discord.ext import commands
@@ -69,7 +76,7 @@ VOICE_COOLDOWN_SECONDS = 5
 DEBUG_CHANNEL_IDS = [ 698924302594211883, 698633099591942199 ]
 
 # Load the system prompt and classifier prompt from template files
-TEMPLATE_DIR = Path(__file__).parent / "Response Templates"
+TEMPLATE_DIR = BONG_DATA / "Response Templates"
 prompt_template = (TEMPLATE_DIR / "Bong.txt").read_text(encoding="utf-8")
 classifier_template = (TEMPLATE_DIR / "Spoken_To_Classifier.txt").read_text(encoding="utf-8")
 
@@ -320,7 +327,7 @@ async def _handle_describe_image(tool_args, image_attachments):
         label = re.sub(r'[^\w]', '', raw_label.replace(" ", "_"))[:50] or "image"
 
         # Save the image to saved_images/ with the generated label as filename
-        save_dir = Path(__file__).parent / "saved_images"
+        save_dir = BONG_DATA / "saved_images"
         save_dir.mkdir(exist_ok=True)
         ext = Path(img['filename']).suffix or ".png"
         save_path = save_dir / f"{label}{ext}"
@@ -353,7 +360,7 @@ async def _handle_read_text_file(tool_args, text_attachments):
     txt = text_attachments[idx]
     try:
         # Save the text file to saved_texts/ for future reference
-        save_dir = Path(__file__).parent / "saved_texts"
+        save_dir = BONG_DATA / "saved_texts"
         save_dir.mkdir(exist_ok=True)
         ext = Path(txt['filename']).suffix or ".txt"
         clean_name = re.sub(r'[^\w]', '_', Path(txt['filename']).stem)[:50] or "text_file"
@@ -973,7 +980,7 @@ async def process_voice_command(bot, guild, channel, user_id: int, username: str
 
         messages = [HumanMessage(content=system_msg_content)]
 
-        last_prompt_path = Path(__file__).parent / "logs" / "last_prompt.log" if debug.is_debug() else None
+        last_prompt_path = BONG_DATA / "logs" / "last_prompt.log" if debug.is_debug() else None
         if last_prompt_path:
             last_prompt_path.parent.mkdir(parents=True, exist_ok=True)
             last_prompt_path.write_text(system_msg_content + "\n\n========\n", encoding="utf-8")
@@ -1223,7 +1230,7 @@ class BongCog(commands.Cog):
                 messages = [HumanMessage(content=system_msg)]
 
                 # Write the full prompt to the log file for debugging
-                last_prompt_path = Path(__file__).parent / "logs" / "last_prompt.log" if debug.is_debug() else None
+                last_prompt_path = BONG_DATA / "logs" / "last_prompt.log" if debug.is_debug() else None
                 if last_prompt_path:
                     last_prompt_path.parent.mkdir(parents=True, exist_ok=True)
                     last_prompt_path.write_text(system_msg + "\n\n========\n", encoding="utf-8")

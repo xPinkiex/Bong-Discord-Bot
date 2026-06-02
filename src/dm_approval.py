@@ -5,6 +5,11 @@
 # into users.json.
 
 import discord
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import user_data
 
 # Track users currently waiting for approval so we don't send duplicate requests

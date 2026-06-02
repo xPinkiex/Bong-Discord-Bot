@@ -8,23 +8,28 @@ __pycache__/
 venv/
 .pytest_cache/
 
-# Saved data
-saved_images/
-saved_sounds/
-saved_texts/
-downloads/
-logs/
-backup/
+# Bot data
+bong_data/saved_images/
+bong_data/saved_sounds/
+bong_data/saved_texts/
+bong_data/downloads/
+bong_data/logs/
+bong_data/backup/
+bong_data/chroma_db/
+bong_data/whisper_models/
+bong_data/song_stats.json
+
+# User data
+bong_user_data/users.json
+bong_user_data/reminders.json
+
+# Wake word
+bong_data/wakeword_training/
+bong_data/wakeword_models/*
+!bong_data/wakeword_models/hey_bong.onnx
+
+# Approved DM users (moved under bong_data or bong_user_data)
 approved_dm_users.json
-users.json
-reminders.json
-song_stats.json
-
-# ChromaDB
-chroma_db/
-
-# Whisper model cache
-whisper_models/
 
 # IDE / Editor
 .vscode/
@@ -36,11 +41,6 @@ Thumbs.db
 
 # Continue
 .continue/
-
-# Wake word training data
-wakeword_training/
-wakeword_models/*
-!wakeword_models/hey_bong.onnx
 
 # Opencode
 opencode.json

@@ -14,8 +14,13 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+BONG_DATA = PROJECT_ROOT / "bong_data"
+
 _start = time.monotonic()
-_log_dir = Path(__file__).parent / "logs"
+_log_dir = BONG_DATA / "logs"
 
 def _get_state():
     """Return the persistent debug state dict (survives module reloads).

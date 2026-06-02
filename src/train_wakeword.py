@@ -26,14 +26,19 @@ import subprocess
 import sys
 from pathlib import Path
 
-SCRIPT_DIR = Path(__file__).parent.resolve()
-TRAINING_DIR = SCRIPT_DIR / "wakeword_training"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+BONG_DATA = PROJECT_ROOT / "bong_data"
+
+SCRIPT_DIR = PROJECT_ROOT
+TRAINING_DIR = BONG_DATA / "wakeword_training"
 OWW_REPO_DIR = TRAINING_DIR / "openwakeword"
 PIPER_DIR = TRAINING_DIR / "piper-sample-generator"
 PIPER_MODEL = PIPER_DIR / "en_US-libritts_r-medium.pt"
 MODEL_NAME = "hey_bong"
 OUTPUT_DIR = TRAINING_DIR / "wakeword_model"
-WAKEWORD_MODELS_DIR = SCRIPT_DIR / "wakeword_models"
+WAKEWORD_MODELS_DIR = BONG_DATA / "wakeword_models"
 CONFIG_PATH = TRAINING_DIR / "hey_bong_config.yml"
 
 RIR_DIR = TRAINING_DIR / "mit_rirs"

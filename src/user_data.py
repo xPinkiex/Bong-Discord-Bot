@@ -8,8 +8,15 @@
 
 import json
 from pathlib import Path
+import sys
 
-_USERS_FILE = Path(__file__).parent / "users.json"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+BONG_DATA = PROJECT_ROOT / "bong_data"
+BONG_USER_DATA = PROJECT_ROOT / "bong_user_data"
+
+_USERS_FILE = BONG_USER_DATA / "users.json"
 
 # In-memory data: user_id -> dict of settings
 _user_data: dict[int, dict] = {}

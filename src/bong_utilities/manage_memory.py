@@ -3,15 +3,20 @@ import argparse
 import sys
 from pathlib import Path
 
-from langchain_chroma import Chroma
-from langchain_ollama import OllamaEmbeddings
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+BONG_DATA = PROJECT_ROOT / "bong_data"
 
 CSI = "\033["
 RESET = f"{CSI}0m"
 COLOR_EVEN = f"{CSI}36m"
 COLOR_ODD = f"{CSI}33m"
 
-DB_DIR = Path(__file__).resolve().parent.parent / "chroma_db"
+DB_DIR = BONG_DATA / "chroma_db"
+
+from langchain_chroma import Chroma
+from langchain_ollama import OllamaEmbeddings
 
 db = Chroma(
     collection_name="bong_memories",

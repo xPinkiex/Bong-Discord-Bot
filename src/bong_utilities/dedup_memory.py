@@ -4,12 +4,17 @@ import argparse
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+BONG_DATA = PROJECT_ROOT / "bong_data"
+
 from langchain_chroma import Chroma
 from langchain_ollama import OllamaEmbeddings
 from langchain_ollama.chat_models import ChatOllama
 from langchain_core.messages import HumanMessage, SystemMessage
 
-DB_DIR = Path(__file__).resolve().parent.parent / "chroma_db"
+DB_DIR = BONG_DATA / "chroma_db"
 
 parser = argparse.ArgumentParser(description="Deduplicate Bong's long-term memory by merging duplicates")
 parser.add_argument("-t", "--threshold", type=float, default=0.7, help="Similarity threshold for dedup (default: 0.7)")

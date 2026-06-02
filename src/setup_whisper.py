@@ -4,7 +4,12 @@
 import sys
 from pathlib import Path
 
-MODEL_DIR = Path(__file__).parent / "whisper_models"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+BONG_DATA = PROJECT_ROOT / "bong_data"
+
+MODEL_DIR = BONG_DATA / "whisper_models"
 MODEL_SIZE = "small"
 
 def main():
