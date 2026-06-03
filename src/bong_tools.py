@@ -5,7 +5,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BONG_DATA = PROJECT_ROOT / "bong_data"
-BONG_USER_DATA = PROJECT_ROOT / "bong_user_data"
 
 DOWNLOAD_DIR = BONG_DATA / "saved_sounds"
 DOWNLOAD_DIR.mkdir(exist_ok=True)
@@ -26,7 +25,6 @@ pending_resume = False
 pending_stop = False
 pending_skip = False
 pending_skip_target = None
-pending_skip_info = ""
 pending_send_image = None
 pending_send_text = None
 pending_start_listening = None
@@ -36,7 +34,6 @@ voice_connected = False
 caller_in_voice = False
 current_user_id = None
 current_channel_id = None
-authorized = False
 current_username = ""
 start_time = None
 shuffle_enabled = False
@@ -70,7 +67,6 @@ def reset_pending():
     bong_tools.pending_stop = False
     bong_tools.pending_skip = False
     bong_tools.pending_skip_target = None
-    bong_tools.pending_skip_info = ""
     bong_tools.pending_send_image = None
     bong_tools.pending_send_text = None
     bong_tools.pending_start_listening = None
@@ -79,20 +75,22 @@ def reset_pending():
 
 def refresh_image_library():
     bong_tools.image_library = sorted(
-        p for p in bong_tools.IMAGE_DIR.iterdir()
-        if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+        (p for p in bong_tools.IMAGE_DIR.iterdir()
+         if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")),
+        key=lambda p: p.name,
     )
 
 
 def refresh_text_library():
     bong_tools.text_library = sorted(
-        p for p in bong_tools.TEXT_DIR.iterdir()
-        if p.suffix.lower() in (".txt", ".md", ".py", ".json", ".csv", ".xml", ".yaml", ".yml", ".cfg", ".ini", ".log", ".toml", ".rs", ".js", ".ts", ".html", ".css", ".sh", ".bat")
+        (p for p in bong_tools.TEXT_DIR.iterdir()
+         if p.suffix.lower() in (".txt", ".md", ".py", ".json", ".csv", ".xml", ".yaml", ".yml", ".cfg", ".ini", ".log", ".toml", ".rs", ".js", ".ts", ".html", ".css", ".sh", ".bat")),
+        key=lambda p: p.name,
     )
 
 
 def refresh_music_library():
-    bong_tools.music_library = sorted(bong_tools.DOWNLOAD_DIR.glob("*.mp3"))
+    bong_tools.music_library = sorted(bong_tools.DOWNLOAD_DIR.glob("*.mp3"), key=lambda p: p.name)
 
 
 refresh_music_library()

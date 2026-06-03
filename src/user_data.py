@@ -6,7 +6,6 @@
 # users.json format:
 #   {"273761843544064000": {"tier": "admin", "timezone": 2}, ...}
 
-import json
 from pathlib import Path
 import sys
 
@@ -45,11 +44,6 @@ def load_users():
     _store.data = converted
     _store.mark_dirty()
     _user_data = _store.data
-
-
-def save_users():
-    """Mark user data as needing a flush to disk."""
-    _store.mark_dirty()
 
 
 def get_tier(user_id: int) -> str | None:
@@ -93,14 +87,6 @@ def set_timezone(user_id: int, offset: float):
     """Set the UTC offset for a user and persist."""
     _user_data.setdefault(user_id, {})["timezone"] = offset
     _store.mark_dirty()
-
-
-def remove_timezone(user_id: int):
-    """Remove the timezone for a user and persist."""
-    entry = _user_data.get(user_id)
-    if entry and "timezone" in entry:
-        del entry["timezone"]
-        _store.mark_dirty()
 
 
 def add_tokens(user_id: int, count: int, display_name: str = ""):
@@ -180,17 +166,14 @@ def parse_timezone(text: str) -> float | None:
     """
     import re
 
-    # Try named zone / city lookup first (case-insensitive)
     key = text.strip().lower()
     if key in _TZ_ALIASES:
         return _TZ_ALIASES[key]
 
-    # Try UTC offset parsing
     m = _TZ_REGEX.match(text)
     if m:
         sign = -1 if m.group(1) == "-" else 1
         if m.group(4) is not None:
-            # Decimal hours like +5.5
             hours = float(m.group(4))
         elif m.group(2) is not None:
             hours = int(m.group(2))
@@ -204,3 +187,7 @@ def parse_timezone(text: str) -> float | None:
         return None
 
     return None
+
+
+def known_user_count() -> int:
+    return len(_user_data)

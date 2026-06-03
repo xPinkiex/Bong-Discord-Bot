@@ -4,12 +4,8 @@
 # in reminders.json and checked every 30 seconds by a background task in the cog.
 # When a reminder is due, Bong DMs the user.
 
-import json
-import asyncio
-from datetime import datetime, timedelta
-from typing import Optional
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from dataclasses import dataclass, asdict
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -27,15 +23,12 @@ persist.register(_store)
 # In-memory list of active reminders (alias to _store.data after load)
 reminders: list[dict] = []
 
-# Pending reminders that the cog should deliver (set by the tool, read by the cog)
-pending_reminders: list[dict] = []
-
 
 def load_reminders():
     """Load reminders from disk, removing any that are already past due."""
     global reminders
     _store.load()
-    now = datetime.now().timestamp()
+    now = datetime.now(timezone.utc).timestamp()
     reminders[:] = [r for r in _store.data if r.get("due_at", 0) > now]
     _store.data = reminders
     _store.mark_dirty()
@@ -87,7 +80,7 @@ def list_reminders(user_id: int) -> str:
     if not user_reminders:
         return "No pending reminders."
     lines = []
-    now = datetime.now().timestamp()
+    now = datetime.now(timezone.utc).timestamp()
     for i, r in enumerate(user_reminders, 1):
         delta = r["due_at"] - now
         if delta > 0:
@@ -126,7 +119,6 @@ def parse_time_delta(text: str) -> float | None:
     import re
     text = text.lower().strip()
 
-    # Map of unit names and abbreviations to seconds
     units = {
         "second": 1, "seconds": 1, "sec": 1, "secs": 1, "s": 1,
         "minute": 60, "minutes": 60, "min": 60, "mins": 60, "m": 60,
@@ -135,7 +127,6 @@ def parse_time_delta(text: str) -> float | None:
         "week": 604800, "weeks": 604800, "w": 604800,
     }
 
-    # Match patterns like "2 hours", "30m", "1 day 2 hours"
     pattern = r"(\d+(?:\.\d+)?)\s*(" + "|".join(units.keys()) + r")\b"
     matches = re.findall(pattern, text)
 
@@ -181,7 +172,7 @@ class PastDateError(ValueError):
     pass
 
 
-def parse_absolute_time(text: str, utc_offset: Optional[float] = None) -> Optional[float]:
+def parse_absolute_time(text: str, utc_offset: float | None = None) -> float | None:
     """Parse an absolute date/time expression into a UTC timestamp.
 
     Accepts expressions like:
@@ -203,13 +194,11 @@ def parse_absolute_time(text: str, utc_offset: Optional[float] = None) -> Option
 
     text = text.lower().strip().rstrip(".")
 
-    # Determine the user's "now" in their timezone
     if utc_offset is not None:
-        now_local = datetime.utcnow() + timedelta(hours=utc_offset)
+        now_local = datetime.now(timezone.utc) + timedelta(hours=utc_offset)
     else:
-        now_local = datetime.utcnow()
+        now_local = datetime.now(timezone.utc)
 
-    # Parse the time portion — supports "3pm", "3:00pm", "15:00", "3:00 pm", "12am", etc.
     time_patterns = [
         r'(?:(?:at\s+)?|^)(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b',
         r'(?:(?:at\s+)?|^)(\d{1,2}):(\d{2})\b',
@@ -234,18 +223,14 @@ def parse_absolute_time(text: str, utc_offset: Optional[float] = None) -> Option
                 minute = int(groups[1])
             break
 
-    # Determine the date
     target_date = None
 
-    # "today"
     if re.search(r'\btoday\b', text):
         target_date = now_local.date()
 
-    # "tomorrow"
     elif re.search(r'\btomorrow\b', text):
         target_date = now_local.date() + timedelta(days=1)
 
-    # "next <dayname>"
     next_match = re.search(r'\bnext\s+(\w+)\b', text)
     if next_match and target_date is None:
         day_name = next_match.group(1)
@@ -256,7 +241,6 @@ def parse_absolute_time(text: str, utc_offset: Optional[float] = None) -> Option
                 days_ahead += 7
             target_date = now_local.date() + timedelta(days=days_ahead)
 
-    # "<dayname>" without "next" — means the next occurrence
     if target_date is None:
         for name, weekday in _DAY_NAMES.items():
             if re.search(rf'\b{name}\b', text) and not re.search(r'\bnext\s', text):
@@ -266,7 +250,6 @@ def parse_absolute_time(text: str, utc_offset: Optional[float] = None) -> Option
                 target_date = now_local.date() + timedelta(days=days_ahead)
                 break
 
-    # "<month> <day>" or "<month> <day> <year>" — e.g. "june 5" or "june 5 2026"
     if target_date is None:
         month_match = re.search(
             r'\b(' + '|'.join(_MONTH_NAMES.keys()) + r')\s+(\d{1,2})(?:\s*,?\s*(\d{4}))?\b',
@@ -281,11 +264,9 @@ def parse_absolute_time(text: str, utc_offset: Optional[float] = None) -> Option
             except ValueError:
                 pass
 
-    # Date format patterns — order matters! Longer/more-specific patterns must come
-    # before shorter ones so DD.MM.YYYY matches before DD.MM, etc.
     if target_date is None:
         date_patterns = [
-            (r'(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})\b', lambda m: None),  # disambiguated below
+            (r'(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})\b', lambda m: None),
             (r'(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})\b', lambda m: (int(m.group(1)), int(m.group(2)), int(m.group(3)))),
             (r'(\d{1,2})\.(\d{1,2})\.(\d{4})\b', lambda m: (int(m.group(3)), int(m.group(2)), int(m.group(1)))),
             (r'(\d{1,2})\.(\d{1,2})(?!\.\d)\b', lambda m: (now_local.year, int(m.group(2)), int(m.group(1)))),
@@ -293,19 +274,14 @@ def parse_absolute_time(text: str, utc_offset: Optional[float] = None) -> Option
         for pattern, extractor in date_patterns:
             match = re.search(pattern, text)
             if match:
-                # Ambiguous DD/MM/YYYY vs MM/DD/YYYY — use dot as day.month hint
                 if extractor is None:
-                    # Slash format: try to disambiguate
                     a, b = int(match.group(1)), int(match.group(2))
                     year = int(match.group(3))
                     if a > 12:
-                        # a must be a day -> DD/MM/YYYY
                         month, day = b, a
                     elif b > 12:
-                        # b must be a day -> MM/DD/YYYY (standard US)
                         month, day = a, b
                     else:
-                        # Both could be month or day — default to MM/DD/YYYY
                         month, day = a, b
                     year, month, day = year, month, day
                 else:
@@ -316,24 +292,20 @@ def parse_absolute_time(text: str, utc_offset: Optional[float] = None) -> Option
                     pass
                 break
 
-    # Just a time with no date = today (or tomorrow if the time has already passed)
     if target_date is None and hour is not None:
         target_date = now_local.date()
         tentative = datetime(target_date.year, target_date.month, target_date.day, hour, minute)
         if tentative <= now_local:
             target_date = target_date + timedelta(days=1)
 
-    # Can't parse
     if target_date is None and hour is None:
         return None
     if target_date is None:
         return None
 
-    # Default time to midnight if only a date was given
     if hour is None:
-        hour = 9  # sensible default: 9am
+        hour = 9
 
-    # Build the local datetime and convert to UTC
     try:
         local_dt = datetime(target_date.year, target_date.month, target_date.day, hour, minute)
     except ValueError:
@@ -346,8 +318,7 @@ def parse_absolute_time(text: str, utc_offset: Optional[float] = None) -> Option
 
     ts = utc_dt.timestamp()
 
-    # Must be in the future
-    if ts <= datetime.utcnow().timestamp():
+    if ts <= datetime.now(timezone.utc).timestamp():
         raise PastDateError(f"That date ({local_dt.strftime('%Y-%m-%d %H:%M')}) is in the past.")
 
     return ts

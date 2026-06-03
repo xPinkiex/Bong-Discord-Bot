@@ -10,10 +10,26 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import debug
+import persist
 import user_data
 
-# Track users currently waiting for approval so we don't send duplicate requests
+_APPROVAL_STORE_PATH = user_data.BONG_USER_DATA / "pending_approvals.json"
+_approval_store = persist.PersistStore(_APPROVAL_STORE_PATH, default=[])
+persist.register(_approval_store)
+
 pending_approval: set[int] = set()
+
+
+def load_pending_approvals():
+    _approval_store.load()
+    pending_approval.clear()
+    pending_approval.update(_approval_store.data)
+
+
+def _sync_store():
+    _approval_store.data = list(pending_approval)
+    _approval_store.mark_dirty()
 
 # The owner who receives approval requests
 OWNER_ID = user_data.OWNER_ID
@@ -22,23 +38,27 @@ OWNER_ID = user_data.OWNER_ID
 class ApproveView(discord.ui.View):
     """Discord UI view with tier selection buttons for DM access requests."""
 
-    def __init__(self, requesting_user: discord.User | discord.Member, dm_channel: discord.DMChannel):
+    def __init__(self, requesting_user: discord.User | discord.Member):
         super().__init__(timeout=300)
         self.requesting_user = requesting_user
-        self.dm_channel = dm_channel
+        self._expired = False
 
     async def _approve(self, interaction: discord.Interaction, tier: str):
         if interaction.user.id != OWNER_ID:
             await interaction.response.send_message("Only Eve can approve DM access.", ephemeral=True)
             return
-        user_data.set_tier(self.requesting_user.id, tier)
-        pending_approval.discard(self.requesting_user.id)
-        self.stop()
-        tier_label = {"admin": "Admin", "authorized": "Authorized", "user": "User"}[tier]
+        if self._expired:
+            await interaction.response.edit_message(content="⏰ This request has already timed out.", view=None)
+            return
+        tier_label = {"admin": "Admin", "authorized": "Authorized", "user": "User"}.get(tier, tier.title())
         await interaction.response.edit_message(
             content=f"✅ Approved **{self.requesting_user.display_name}** ({self.requesting_user.id}) as **{tier_label}**.",
             view=None,
         )
+        user_data.set_tier(self.requesting_user.id, tier)
+        pending_approval.discard(self.requesting_user.id)
+        _sync_store()
+        self.stop()
         try:
             await self.requesting_user.send("Eve has approved you to talk with me! You can now send me messages here. 🎉")
         except discord.Forbidden:
@@ -61,19 +81,29 @@ class ApproveView(discord.ui.View):
         if interaction.user.id != OWNER_ID:
             await interaction.response.send_message("Only Eve can deny DM access.", ephemeral=True)
             return
-        pending_approval.discard(self.requesting_user.id)
-        self.stop()
+        if self._expired:
+            await interaction.response.edit_message(content="⏰ This request has already timed out.", view=None)
+            return
         await interaction.response.edit_message(
             content=f"❌ Denied **{self.requesting_user.display_name}** ({self.requesting_user.id}) DM access.",
             view=None,
         )
+        pending_approval.discard(self.requesting_user.id)
+        _sync_store()
+        self.stop()
         try:
             await self.requesting_user.send("Eve has denied your request to talk with me. Sorry!")
         except discord.Forbidden:
             pass
 
     async def on_timeout(self):
+        self._expired = True
         pending_approval.discard(self.requesting_user.id)
+        _sync_store()
+        try:
+            await self.requesting_user.send("Your approval request has timed out.")
+        except Exception:
+            pass
 
 
 async def process_dm(message: discord.Message, bot: discord.Client) -> bool:
@@ -96,18 +126,20 @@ async def process_dm(message: discord.Message, bot: discord.Client) -> bool:
         return False
 
     pending_approval.add(user.id)
+    _sync_store()
 
     owner = bot.get_user(OWNER_ID)
     if not owner:
         try:
             owner = await bot.fetch_user(OWNER_ID)
-        except Exception:
+        except Exception as e:
+            debug.error("Approval", f"Failed to fetch owner: {e}")
             pending_approval.discard(user.id)
+            _sync_store()
             return False
 
-    preview = (message.content[:100] + "...") if len(message.content) > 100 else (message.content or "(attachment)")
-    dm_channel = await user.create_dm()
-    view = ApproveView(user, dm_channel)
+    preview = (message.content[:100] + "...") if len(message.content) > 100 else (message.content or ("(attachment)" if message.attachments else "(empty message)"))
+    view = ApproveView(user)
     try:
         await owner.send(
             f"🔒 **DM Access Request**\n"
@@ -117,6 +149,7 @@ async def process_dm(message: discord.Message, bot: discord.Client) -> bool:
         )
     except discord.Forbidden:
         pending_approval.discard(user.id)
+        _sync_store()
         return False
 
     try:

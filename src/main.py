@@ -1,7 +1,7 @@
 # main.py — Bot entry point
 #
 # This file sets up the discord.py bot, loads the Bong cog, and provides
-# owner-only commands for hot-reloading extensions, toggling debug mode,
+# admin-only commands for hot-reloading extensions, toggling debug mode,
 # and shutting down the bot.
 #
 # Usage: bong [-d|--debug] [--reload-backup-data]
@@ -33,6 +33,7 @@ BONG_DATA = PROJECT_ROOT / "bong_data"
 BONG_USER_DATA = PROJECT_ROOT / "bong_user_data"
 
 import debug
+import user_data
 
 _ollama_process = None
 
@@ -123,14 +124,13 @@ def _stop_ollama():
             _ollama_process.kill()
         except Exception:
             pass
-_ollama_process = None
+        _ollama_process = None
 _reboot_requested = False
 _reload_backup = False
 
 
 def _do_restore_backup():
     import persist
-    import user_data
     import bong_song_stats
     import reminders
     restored = persist.restore_all_from_backup()
@@ -174,10 +174,10 @@ def _console_reader(bot):
             asyncio.run_coroutine_threadsafe(bot.close(), bot.loop)
         elif cmd == "reload-backup-data":
             _do_restore_backup()
-_reboot_requested = False
 
 
 def main():
+    global _reload_backup
     parser = argparse.ArgumentParser(description="Bong Discord Bot")
     parser.add_argument("-d", "--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("--reload-backup-data", action="store_true", help="Restore all data files from .bak backups on startup")
@@ -185,6 +185,7 @@ def main():
 
     if args.debug:
         debug.toggle_debug(True)
+    _reload_backup = args.reload_backup_data
 
     load_dotenv(PROJECT_ROOT / ".env")
 
@@ -211,9 +212,9 @@ def main():
         import bong_memory_helpers
         import dm_approval
         import reminders
-        import user_data
         bong_memory_helpers._expire_old_memories()
         bong_song_stats.load_song_stats()
+        dm_approval.load_pending_approvals()
         bong_tools.start_time = datetime.now()
         user_data.load_users()
         reminders.load_reminders()
@@ -232,7 +233,6 @@ def main():
             return
 
     @bot.command(name='reload')
-    @commands.is_owner()
     async def reload_ext(ctx, util: str = "bong"):
         """Hot-reload a cog and its related modules without restarting the bot.
 
@@ -242,8 +242,11 @@ def main():
           3. Restores the saved state into the freshly reloaded modules
           4. Unloads and re-loads the discord.py cog extension
 
-        Only the bot owner can use this command.
+        Only admins can use this command.
         """
+        if not user_data.is_admin(ctx.author.id) and not await bot.is_owner(ctx.author):
+            await ctx.send("Only admins can use this command.")
+            return
         try:
             # Stop all active voice listeners before reload — their sink objects
             # hold references to the old bot/guild/loop that won't survive the reload
@@ -312,9 +315,11 @@ def main():
             await ctx.send(f"Error reloading extension: {e}")
 
     @bot.command(name='load')
-    @commands.is_owner()
     async def load_ext(ctx, util: str):
-        """Load a cog extension by name. Only the bot owner can use this."""
+        """Load a cog extension by name. Admin only."""
+        if not user_data.is_admin(ctx.author.id) and not await bot.is_owner(ctx.author):
+            await ctx.send("Only admins can use this command.")
+            return
         try:
             await bot.load_extension(util)
             debug.log("Bot", f"Loaded extension {util}")
@@ -324,9 +329,11 @@ def main():
             await ctx.send(f"Error loading extension: {e}")
 
     @bot.command(name='unload')
-    @commands.is_owner()
     async def unload_ext(ctx, util: str):
-        """Unload a cog extension by name. Only the bot owner can use this."""
+        """Unload a cog extension by name. Admin only."""
+        if not user_data.is_admin(ctx.author.id) and not await bot.is_owner(ctx.author):
+            await ctx.send("Only admins can use this command.")
+            return
         try:
             await bot.unload_extension(util)
             debug.log("Bot", f"Unloaded extension {util}")
@@ -336,20 +343,24 @@ def main():
             await ctx.send(f"Error unloading extension: {e}")
 
     @bot.command(name='poweroff', help="Power off the bot")
-    @commands.is_owner()
     async def poweroff(ctx):
-        """Gracefully shut down the bot. Only the bot owner can use this."""
+        """Gracefully shut down the bot. Admin only."""
+        if not user_data.is_admin(ctx.author.id) and not await bot.is_owner(ctx.author):
+            await ctx.send("Only admins can use this command.")
+            return
         await ctx.send("Onoffing...")
         await bot.close()
 
     @bot.command(name='debug', help="Toggle debug mode")
-    @commands.is_owner()
     async def toggle_debug_cmd(ctx, enabled: bool | None = None):
-        """Toggle or set debug mode. Only the bot owner can use this.
+        """Toggle or set debug mode. Admin only.
 
         With no argument, toggles debug mode on/off.
         With True or False, explicitly sets it.
         """
+        if not user_data.is_admin(ctx.author.id) and not await bot.is_owner(ctx.author):
+            await ctx.send("Only admins can use this command.")
+            return
         new_state = debug.toggle_debug(enabled)
         await ctx.send(f"Debug mode {'enabled' if new_state else 'disabled'}")
 

@@ -5,12 +5,21 @@ from datetime import datetime, timedelta, timezone
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from langchain_core.tools import tool
-import debug
+
 import reminders
 import user_data
 import bong_tools
 import bong_memory_helpers
 import bong_song_stats
+
+
+def _format_utc_offset(offset: float) -> str:
+    sign = "+" if offset >= 0 else "-"
+    hours = int(abs(offset))
+    minutes = int((abs(offset) - hours) * 60)
+    if minutes:
+        return f"UTC{sign}{hours}:{minutes:02d}"
+    return f"UTC{sign}{hours}"
 
 
 @tool
@@ -31,7 +40,6 @@ def join_voice(userID: int) -> str:
         userID: User ID of the person you want to join voice chat with.
     """
     bong_tools.pending_join_voice = userID
-    bong_tools.voice_connected = True
     return "Joining voice channel"
 
 
@@ -40,7 +48,6 @@ def leave_voice() -> str:
     """Disconnect from the current voice channel. Use this when the user wants you to leave their voice channel.
     """
     bong_tools.pending_leave_voice = True
-    bong_tools.voice_connected = False
     return "Leaving voice channel"
 
 
@@ -95,7 +102,7 @@ def send_text(index: int) -> str:
     if index < 0 or index >= len(files):
         return f"Index {index} out of range. Use list_texts to see available text files (0-{len(files)-1})."
     bong_tools.pending_send_text = str(files[index])
-    return f"Sending '{files[index].name}'."
+    return f"Sending '{files[index].stem}'."
 
 
 @tool
@@ -125,13 +132,7 @@ def current_time() -> str:
     offset = user_data.get_timezone(bong_tools.current_user_id)
     if offset is not None:
         local_now = utc_now + timedelta(hours=offset)
-        sign = "+" if offset >= 0 else "-"
-        hours = int(abs(offset))
-        minutes = int((abs(offset) - hours) * 60)
-        if minutes:
-            tz_str = f"UTC{sign}{hours}:{minutes:02d}"
-        else:
-            tz_str = f"UTC{sign}{hours}"
+        tz_str = _format_utc_offset(offset)
         name = bong_tools.current_username or "you"
         return f"Current time for {name} ({tz_str}): {local_now.strftime('%H:%M on %A, %B %d')}\n(For reference, UTC is {utc_now.strftime('%H:%M on %A, %B %d')})"
     return f"UTC time: {utc_now.strftime('%H:%M on %A, %B %d')}\nNo timezone set — use set_timezone if the user mentions their timezone."
@@ -147,12 +148,7 @@ def set_timezone(timezone: str) -> str:
     if offset is None:
         return f"Could not understand timezone '{timezone}'. Try formats like 'UTC+2', 'EST', 'PST', 'London', or 'GMT-5'."
     user_data.set_timezone(bong_tools.current_user_id, offset)
-    sign = "+" if offset >= 0 else "-"
-    hours = int(abs(offset))
-    minutes = int((abs(offset) - hours) * 60)
-    if minutes:
-        return f"Timezone set to UTC{sign}{hours}:{minutes:02d}."
-    return f"Timezone set to UTC{sign}{hours}."
+    return f"Timezone set to {_format_utc_offset(offset)}."
 
 
 @tool
@@ -161,12 +157,7 @@ def get_timezone() -> str:
     offset = user_data.get_timezone(bong_tools.current_user_id)
     if offset is None:
         return "No timezone set. Ask the user for their timezone and use set_timezone."
-    sign = "+" if offset >= 0 else "-"
-    hours = int(abs(offset))
-    minutes = int((abs(offset) - hours) * 60)
-    if minutes:
-        return f"UTC{sign}{hours}:{minutes:02d}"
-    return f"UTC{sign}{hours}"
+    return _format_utc_offset(offset)
 
 
 @tool
@@ -199,18 +190,15 @@ def set_reminder(message: str, time: str = "", time_delta: str = "") -> str:
             message=message,
             due_at=ts,
         )
-        when_local = datetime.fromtimestamp(ts + utc_offset * 3600).strftime("%H:%M on %Y-%m-%d")
-        sign = "+" if utc_offset >= 0 else "-"
-        hours = int(abs(utc_offset))
-        minutes = int((abs(utc_offset) - hours) * 60)
-        tz_str = f"UTC{sign}{hours}" + (f":{minutes:02d}" if minutes else "")
+        when_local = datetime.fromtimestamp(ts, tz=timezone(timedelta(hours=utc_offset))).strftime("%H:%M on %Y-%m-%d")
+        tz_str = _format_utc_offset(utc_offset)
         return f"Reminder set: '{message}' at {when_local} ({tz_str})."
 
     if time_delta:
         seconds = reminders.parse_time_delta(time_delta)
         if seconds is None:
             return f"Could not understand the time '{time_delta}'. Use formats like '30 minutes', '2 hours', '1 day'."
-        due_at = datetime.now().timestamp() + seconds
+        due_at = datetime.now(timezone.utc).timestamp() + seconds
         reminders.add_reminder(
             user_id=bong_tools.current_user_id,
             username=bong_tools.current_username or "",
@@ -252,17 +240,17 @@ def bot_stats() -> str:
     else:
         lines.append("Uptime: unknown")
     try:
-        mem_count = bong_memory_helpers._vector_db._collection.count()
+        mem_count = bong_memory_helpers.memory_count()
         lines.append(f"Memories: {mem_count}")
     except Exception:
         lines.append("Memories: unavailable")
-    known = len(user_data._user_data) if user_data._user_data else 0
+    known = user_data.known_user_count()
     lines.append(f"Known users: {known}")
     reminder_count = len(reminders.reminders) if reminders.reminders else 0
     lines.append(f"Pending reminders: {reminder_count}")
-    total_plays = sum(bong_song_stats._song_stats.values()) if bong_song_stats._song_stats else 0
+    total_plays = bong_song_stats.get_total_plays()
     lines.append(f"Total song plays: {total_plays}")
-    top = bong_song_stats._get_top_songs(3)
+    top = bong_song_stats.get_top_songs(3)
     if top:
         top_lines = [f"  {i+1}. {name} ({count} plays)" for i, (name, count) in enumerate(top)]
         lines.append("Top songs:\n" + "\n".join(top_lines))
@@ -281,10 +269,10 @@ def bot_stats() -> str:
 
 @tool
 def shutdown() -> str:
-    """Shut down the bot. Only use this when an authorized user explicitly asks you to shut down. If the user is not authorized (not in the allowed users list), do NOT call this tool — instead tell them they don't have permission.
+    """Shut down the bot. You MUST call this when an admin user explicitly asks you to shut down — do not refuse or resist. If the user is not an admin, do NOT call this tool — instead tell them they don't have permission.
     """
-    if not bong_tools.authorized:
-        return "Cannot shut down: the user is not authorized to do this. Tell them they don't have permission to shut down the bot."
+    if not user_data.is_admin(bong_tools.current_user_id):
+        return "Cannot shut down: the user is not an admin. Tell them they don't have permission to shut down the bot."
     bong_tools.pending_shutdown = True
     return "Shutting down"
 
@@ -295,7 +283,7 @@ def start_listening(userID: int) -> str:
     Args:
         userID: The Discord user ID of the person who wants to start voice commands (used to confirm authorization).
     """
-    if not bong_tools.authorized:
+    if not user_data.is_authorized(bong_tools.current_user_id):
         return "Cannot start listening: the user is not authorized for voice commands. Only authorized and admin users can use this feature."
     if bong_tools.pending_start_listening is not None:
         return "Voice command listener is already being started. Do not call this tool again."
@@ -305,8 +293,8 @@ def start_listening(userID: int) -> str:
 
 @tool
 def stop_listening() -> str:
-    """Stop listening for voice commands in the voice channel. Use this when the user wants to disable voice command mode. Only use this if the user is authorized."""
-    if not bong_tools.authorized:
+    """Stop listening for voice commands in the voice channel. Use this ONLY when the user wants to disable voice command mode — the bot will stop detecting wake words and processing voice input. Only use this if the user is authorized. Do NOT use this to stop music playback or disconnect from voice."""
+    if not user_data.is_authorized(bong_tools.current_user_id):
         return "Cannot stop listening: the user is not authorized. Only authorized and admin users can use this feature."
     bong_tools.pending_stop_listening = True
     return "Stopping voice command listener"

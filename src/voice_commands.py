@@ -19,6 +19,7 @@ import asyncio
 import gc
 import io
 import time
+import traceback
 import wave
 from collections import defaultdict
 from pathlib import Path
@@ -29,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BONG_DATA = PROJECT_ROOT / "bong_data"
-BONG_USER_DATA = PROJECT_ROOT / "bong_user_data"
+
 
 import numpy as np
 import debug
@@ -103,10 +104,11 @@ class _SharedAudioFeatures:
         self.accumulated_samples += len(x)
         if self.accumulated_samples >= 1280:
             self._streaming_melspectrogram(self.accumulated_samples)
-            for i in np.arange(self.accumulated_samples // 1280 - 1, -1, -1):
-                ndx = -8 * i
-                ndx = ndx if ndx != 0 else len(self.melspectrogram_buffer)
-                x_feat = self.melspectrogram_buffer[-76 + ndx:ndx].astype(np.float32)[None, :, :, None]
+            n_windows = self.accumulated_samples // 1280
+            for i in range(n_windows):
+                end = len(self.melspectrogram_buffer) - (n_windows - 1 - i) * 76
+                start = end - 76
+                x_feat = self.melspectrogram_buffer[start:end].astype(np.float32)[None, :, :, None]
                 if x_feat.shape[1] == 76:
                     self.feature_buffer = np.vstack((self.feature_buffer,
                                                      self.embedding_model.run(None, {'input_1': x_feat})[0].squeeze()))
@@ -210,7 +212,8 @@ def _predict_for_user(user_id: int, audio_chunk: np.ndarray) -> dict:
     if user_id not in _oww_user_states:
         _oww_user_states[user_id] = OwwUserState(user_id, _oww_shared_model)
     state = _oww_user_states[user_id]
-    return state.predict(audio_chunk, vad_threshold=_oww_shared_model.vad_threshold if _oww_shared_model.vad_threshold > 0 else 0)
+    vad_threshold = getattr(_oww_shared_model, 'vad_threshold', 0.5)
+    return state.predict(audio_chunk, vad_threshold=vad_threshold if vad_threshold > 0 else 0)
 
 
 def _reset_oww_for_user(user_id: int):
@@ -291,13 +294,6 @@ def _get_whisper_model():
         return _whisper_model
 
 
-def _get_oww_model():
-    global _oww_shared_model
-    with _model_lock:
-        if _oww_shared_model is None:
-            _load_models()
-        return _oww_shared_model
-
 
 def _vlog(msg: str):
     debug.log("VoiceCmd", msg)
@@ -355,7 +351,6 @@ SAMPLE_WIDTH = 2      # 16-bit PCM
 CHANNELS = 2          # Stereo
 WHISPER_SAMPLE_RATE = 16000  # Whisper expects 16kHz mono
 WHISPER_CHANNELS = 1
-FRAME_SIZE = SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS // 50  # Bytes per 20ms frame (3840)
 SILENCE_DURATION = 0.8   # Seconds of silence to mark end of utterance
 MIN_UTTERANCE_DURATION = 0.5  # Minimum seconds to consider an utterance
 MAX_UTTERANCE_DURATION = 30.0  # Maximum seconds before forcing transcription
@@ -370,20 +365,11 @@ OWW_FRAME_BYTES = OWW_FRAME_SAMPLES * 2
 # State: which guilds are listening, and the sink instances
 _active_listeners: dict[int, "BongVoiceSink"] = {}
 _is_listening: dict[int, bool] = {}
-_idle_task: asyncio.Task | None = None
 
 
 def is_listening(guild_id: int) -> bool:
     return _is_listening.get(guild_id, False)
 
-
-def _resample_48k_stereo_to_16k_mono(pcm_data: bytes) -> bytes:
-    """Downsample 48kHz stereo to 16kHz mono by taking every 3rd sample and averaging L+R."""
-    if len(pcm_data) < 4:
-        return b''
-    samples = np.frombuffer(pcm_data, dtype=np.int16).reshape(-1, 2)
-    mono = samples[::3, :].mean(axis=1).astype(np.int16)
-    return mono.tobytes()
 
 
 class BongVoiceSink(AudioSink):
@@ -396,13 +382,13 @@ class BongVoiceSink(AudioSink):
         self.text_channel = text_channel
         self.loop = loop
         # Per-user audio buffers (48kHz stereo, buffered after wake word activation)
-        self._buffers: dict[int, bytearray] = defaultdict(bytearray)
+        self._buffers: dict[int, bytearray] = {}
         # Per-user last-speech timestamp for silence detection
         self._last_speech: dict[int, float] = {}
         # Per-user "wake word detected" flag
-        self._activated: dict[int, bool] = defaultdict(bool)
+        self._activated: dict[int, bool] = {}
         # Per-user 16kHz mono resampling buffer for openWakeWord
-        self._oww_buffers: dict[int, bytearray] = defaultdict(bytearray)
+        self._oww_buffers: dict[int, bytearray] = {}
         self._silence_task: asyncio.Task | None = None
         self._stopped = False
 
@@ -446,8 +432,8 @@ class BongVoiceSink(AudioSink):
 
         if not is_fake:
             if user_data.is_authorized(user_id):
-                resampled = _resample_48k_stereo_to_16k_mono(pcm_data)
-                self._oww_buffers[user_id].extend(resampled)
+                resampled = self._resample_to_whisper_format(pcm_data)
+                self._oww_buffers.setdefault(user_id, bytearray()).extend(resampled)
 
                 while len(self._oww_buffers[user_id]) >= OWW_FRAME_BYTES:
                     chunk = bytes(self._oww_buffers[user_id][:OWW_FRAME_BYTES])
@@ -470,7 +456,7 @@ class BongVoiceSink(AudioSink):
         if not self._activated.get(user_id, False):
             return
 
-        self._buffers[user_id].extend(pcm_data)
+        self._buffers.setdefault(user_id, bytearray()).extend(pcm_data)
         self._last_speech[user_id] = time.time()
 
     def _flush_utterance(self, user_id: int) -> bytes | None:
@@ -505,41 +491,44 @@ class BongVoiceSink(AudioSink):
         """Background task that checks for completed utterances based on silence gaps."""
         _vlog("[silence_checker] Started")
         while not self._stopped:
-            await asyncio.sleep(0.15)
-            now = time.time()
-            _cleanup_stale_oww_states()
-            for user_id in list(self._buffers.keys()):
-                if self._stopped:
-                    break
-                buffer = self._buffers.get(user_id)
-                if not buffer:
-                    continue
-                last_speech = self._last_speech.get(user_id, 0)
-                duration = len(buffer) / (SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS)
-                silence_gap = now - last_speech
-
-                if (silence_gap >= SILENCE_DURATION and duration >= MIN_UTTERANCE_DURATION) or duration >= MAX_UTTERANCE_DURATION:
-                    _vlog(f"[silence_checker] Flushing user={user_id} duration={duration:.2f}s silence_gap={silence_gap:.1f}s")
-                    pcm_data = self._flush_utterance(user_id)
-                    if pcm_data is None:
+            try:
+                await asyncio.sleep(0.15)
+                now = time.time()
+                _cleanup_stale_oww_states()
+                for user_id in list(self._buffers.keys()):
+                    if self._stopped:
+                        break
+                    buffer = self._buffers.get(user_id)
+                    if not buffer:
                         continue
+                    last_speech = self._last_speech.get(user_id, 0)
+                    duration = len(buffer) / (SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS)
+                    silence_gap = now - last_speech
 
-                    if not user_data.is_authorized(user_id):
-                        _vlog(f"[silence_checker] Ignoring unauthorized user {user_id}")
-                        continue
+                    if (silence_gap >= SILENCE_DURATION and duration >= MIN_UTTERANCE_DURATION) or duration >= MAX_UTTERANCE_DURATION:
+                        _vlog(f"[silence_checker] Flushing user={user_id} duration={duration:.2f}s silence_gap={silence_gap:.1f}s")
+                        pcm_data = self._flush_utterance(user_id)
+                        if pcm_data is None:
+                            continue
 
-                    _vlog(f"[silence_checker] Queuing transcription for {user_id} ({duration:.1f}s)")
-                    if _whisper_semaphore:
-                        async with _whisper_semaphore:
-                            _vlog(f"[silence_checker] Transcribing utterance from {user_id} ({duration:.1f}s)")
+                        if not user_data.is_authorized(user_id):
+                            _vlog(f"[silence_checker] Ignoring unauthorized user {user_id}")
+                            continue
+
+                        _vlog(f"[silence_checker] Queuing transcription for {user_id} ({duration:.1f}s)")
+                        if _whisper_semaphore:
+                            async with _whisper_semaphore:
+                                _vlog(f"[silence_checker] Transcribing utterance from {user_id} ({duration:.1f}s)")
+                                text = await asyncio.to_thread(self._transcribe, pcm_data, user_id)
+                        else:
                             text = await asyncio.to_thread(self._transcribe, pcm_data, user_id)
-                    else:
-                        text = await asyncio.to_thread(self._transcribe, pcm_data, user_id)
-                    if text:
-                        _vlog(f"[silence_checker] Transcribed ({user_id}): '{text}'")
-                        await self._handle_transcription(user_id, text)
-                    else:
-                        _vlog(f"[silence_checker] Empty transcription for {user_id}")
+                        if text:
+                            _vlog(f"[silence_checker] Transcribed ({user_id}): '{text}'")
+                            await self._handle_transcription(user_id, text)
+                        else:
+                            _vlog(f"[silence_checker] Empty transcription for {user_id}")
+            except Exception:
+                debug.error("[silence_checker]", traceback.format_exc())
 
     def _resample_to_whisper_format(self, pcm_data: bytes) -> bytes:
         """Resample 48kHz stereo PCM to 16kHz mono for Whisper."""
@@ -583,7 +572,6 @@ class BongVoiceSink(AudioSink):
             return text
         except Exception as e:
             _vlog(f"[transcribe] error: {e}")
-            import traceback
             _vlog(f"[transcribe] traceback: {traceback.format_exc()}")
             return ""
 
@@ -596,8 +584,14 @@ class BongVoiceSink(AudioSink):
             command_text = text[wake_word_idx + len(WAKE_WORD):].strip()
             command_text = command_text.lstrip(",.!?;: ")
         else:
-            # openWakeWord detected "hey bong" but Whisper may transcribe differently
-            for wake_prefix in ("hey bong, ", "hey bong ", "bong, ", "bong "):
+            # openWakeWord detected wake word but Whisper may transcribe differently
+            ww_parts = WAKE_WORD.split()
+            prefixes = []
+            for i in range(len(ww_parts)):
+                short = " ".join(ww_parts[i:])
+                prefixes.append(f"{short}, ")
+                prefixes.append(f"{short} ")
+            for wake_prefix in prefixes:
                 if text_lower.startswith(wake_prefix):
                     command_text = text[len(wake_prefix):]
                     break
@@ -633,7 +627,6 @@ class BongVoiceSink(AudioSink):
             )
         except Exception as e:
             _vlog(f"[handle] process_voice_command error: {e}")
-            import traceback
             _vlog(f"[handle] traceback: {traceback.format_exc()}")
 
 

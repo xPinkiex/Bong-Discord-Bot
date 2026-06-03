@@ -28,8 +28,7 @@ def save_memory(fact: str) -> str:
                 old_meta = dict(old["metadatas"][0]) if old["metadatas"] else {}
                 collection.delete(ids=[contradiction_id])
                 old_meta["saved_at"] = datetime.now().timestamp()
-                if bong_tools.current_username:
-                    old_meta["username"] = bong_tools.current_username
+                old_meta["username"] = bong_tools.current_username or ""
                 bong_memory_helpers._vector_db.add_texts([clean_fact], metadatas=[old_meta])
                 return f"Updated memory: {old_text} → {clean_fact}"
             except Exception as e:
@@ -94,7 +93,7 @@ def forget_memory(query: str) -> str:
                 if doc_id:
                     collection = bong_memory_helpers._vector_db._collection
                     collection.delete(ids=[doc_id])
-                    return f"Forgetted: {doc.page_content}"
+                    return f"Forgotten: {doc.page_content}"
         return "No similar memory found to forget. Try describing it differently."
     except Exception as e:
         return f"Failed to forget memory: {e}"

@@ -42,13 +42,10 @@ class TestParseAbsoluteTime:
     def _parse(self, text, utc_offset=None):
         """Parse with a fixed "now" for deterministic tests."""
         with patch("reminders.datetime") as mock_dt:
-            mock_dt.utcnow.return_value = self.FIXED_NOW
-            # Also patch datetime.now() used in _check_reminders etc.
             mock_dt.now.return_value = self.FIXED_NOW
-            # Allow real datetime construction inside the function
             mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-            # timedelta should still work
             mock_dt.timedelta = timedelta
+            mock_dt.timezone = __import__("datetime").timezone
             return parse_absolute_time(text, utc_offset)
 
     def test_tomorrow_at_3pm(self):

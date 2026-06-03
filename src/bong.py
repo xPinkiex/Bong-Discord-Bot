@@ -71,8 +71,8 @@ _voice_cooldowns: dict[int, float] = {}
 VOICE_COOLDOWN_SECONDS = 5
 
 # Permission tiers are managed in dm_approval (users.json + OWNER_ID)
-# - admin:     full access (shutdown, @llm, DMs)
-# - authorized: full access (same as admin for now)
+# - admin:     full access (shutdown, @llm, @reload, @poweroff, DMs)
+# - authorized: chatting + tools + voice commands, no shutdown/reload/@llm
 # - user:      chatting + tools, no @llm or shutdown
 
 # Channels whose history is automatically loaded on startup so Bong has context immediately
@@ -408,14 +408,7 @@ async def dispatch_tool(tool_name, tool_args, image_attachments, text_attachment
         return f"Error: {e}"
 
 
-def _extract_response_text(response):
-    """Extract plain text from an LLM response.
-    
-    Some models return content as a list of chunks instead of a plain string.
-    """
-    if isinstance(response.content, list):
-        return "".join(chunk.text if hasattr(chunk, "text") else str(chunk) for chunk in response.content)
-    return response.content or ""
+from llm_utils import _extract_response_text
 
 
 async def send_chunked(channel, text, max_len=2000):
@@ -560,6 +553,7 @@ def _make_after_play_callback(guild, loop):
             if bong_tools.song_queue:
                 next_track = bong_tools.song_queue.pop(0)
                 bong_tools.current_track = next_track
+                bong_song_stats._increment_song(Path(next_track).stem)
                 vc.play(discord.FFmpegPCMAudio(next_track, options="-filter:a volume=0.3"), after=after_play)
                 asyncio.run_coroutine_threadsafe(_set_voice_status(guild, _build_now_playing_status()), loop)
                 return
@@ -574,6 +568,7 @@ def _make_after_play_callback(guild, loop):
                 if files:
                     next_track = random.choice(files)
                     bong_tools.current_track = str(next_track)
+                    bong_song_stats._increment_song(next_track.stem)
                     vc.play(discord.FFmpegPCMAudio(bong_tools.current_track, options="-filter:a volume=0.3"), after=after_play)
                     asyncio.run_coroutine_threadsafe(_set_voice_status(guild, _build_now_playing_status()), loop)
                     return
@@ -642,6 +637,19 @@ async def _dispatch_join_voice(guild):
     return error
 
 
+async def _stop_playback(vc):
+    """Stop audio playback without killing the voice listener.
+
+    VoiceRecvClient.stop() kills BOTH playback and the voice command
+    listener, so we use stop_playing() instead when available.
+    """
+    from discord.ext.voice_recv import VoiceRecvClient
+    if isinstance(vc, VoiceRecvClient):
+        vc.stop_playing()
+    else:
+        vc.stop()
+
+
 async def _dispatch_leave_voice(guild):
     """Handle pending_leave_voice flag. Disconnects from the current voice channel."""
     if not bong_tools.pending_leave_voice:
@@ -680,7 +688,7 @@ async def _dispatch_play_audio(guild):
         after_play = _make_after_play_callback(guild, asyncio.get_running_loop())
         # If something is already playing, stop it first and wait briefly
         if vc.is_playing() or vc.is_paused():
-            vc.stop()
+            await _stop_playback(vc)
             await asyncio.sleep(0.5)
         source = discord.FFmpegPCMAudio(track_path, options="-filter:a volume=0.3")
         vc.play(source, after=after_play)
@@ -703,7 +711,7 @@ async def _dispatch_loop_audio(guild):
         return None
     # Stop current playback so the after_play callback doesn't interfere
     if vc.is_playing() or vc.is_paused():
-        vc.stop()
+        await _stop_playback(vc)
     bong_tools.current_track = bong_tools.loop_track
     bong_tools.pending_play_audio = bong_tools.loop_track
     bong_tools.loop_track = None
@@ -750,7 +758,7 @@ async def _dispatch_stop_audio(guild):
     vc = guild.voice_client if guild else None
     error = None
     if vc and (vc.is_playing() or vc.is_paused()):
-        vc.stop()
+        await _stop_playback(vc)
     else:
         error = "Nothing is playing to stop."
     await _set_voice_status(guild, None)
@@ -766,19 +774,19 @@ async def _dispatch_skip_audio(guild):
     if not vc or not (vc.is_playing() or vc.is_paused()):
         bong_tools.pending_skip = False
         bong_tools.pending_skip_target = None
-        bong_tools.pending_skip_info = ""
         return "Nothing is playing to skip."
     if not bong_tools.pending_skip_target:
         bong_tools.pending_skip = False
-        bong_tools.pending_skip_info = ""
         return "No music files to skip to."
+    # Consume the queue item that was only peeked at by skip_audio
+    if bong_tools.song_queue and bong_tools.song_queue[0] == bong_tools.pending_skip_target:
+        bong_tools.song_queue.pop(0)
     # Set the skip target as the next track and stop current playback
     bong_tools.current_track = str(bong_tools.pending_skip_target)
     bong_tools.pending_play_audio = str(bong_tools.pending_skip_target)
-    vc.stop()
+    await _stop_playback(vc)
     bong_tools.pending_skip = False
     bong_tools.pending_skip_target = None
-    bong_tools.pending_skip_info = ""
     return None
 
 
@@ -1008,7 +1016,6 @@ async def process_voice_command(bot, guild, channel, user_id: int, username: str
 
         # Set up shared state for this invocation
         await update_voice_state(guild, user_id)
-        bong_tools.authorized = user_data.is_authorized(user_id)
         bong_tools.current_user_id = user_id
         bong_tools.current_username = username
         bong_tools.current_channel_id = channel.id
@@ -1257,7 +1264,6 @@ class BongCog(commands.Cog):
 
                 # Set up shared state for this message's tool loop
                 await update_voice_state(guild, message.author.id)
-                bong_tools.authorized = user_data.is_authorized(message.author.id)
                 bong_tools.current_user_id = message.author.id
                 bong_tools.current_username = message.author.display_name
                 bong_tools.current_channel_id = message.channel.id
@@ -1278,7 +1284,7 @@ class BongCog(commands.Cog):
                 # If a voice action failed, ask the LLM to explain the error to the user
                 if voice_error:
                     messages.append(HumanMessage(content=f"System: The voice/audio action failed with this error: {voice_error}. Please let the user know and suggest what they can do."))
-                    error_response = await invoke_with_retry(model, messages)
+                    error_response = await invoke_with_retry(bound_model, messages)
                     error_text = _extract_response_text(error_response)
                     await send_chunked(message.channel, error_text)
                 else:
@@ -1306,8 +1312,8 @@ class BongCog(commands.Cog):
 
     @commands.command(name="llm", help="Toggle Bong's activity in the current channel")
     async def llm(self, ctx):
-        """Toggle Bong's activity in the current channel. Only admin and authorized users can use this."""
-        if not user_data.is_authorized(ctx.author.id):
+        """Toggle Bong's activity in the current channel. Admin only."""
+        if not user_data.is_admin(ctx.author.id):
             await ctx.send("You are not authorized to use this command.")
             return
         if ctx.channel.id in active_channels:
@@ -1331,16 +1337,16 @@ class BongCog(commands.Cog):
             await ctx.send("Only admins can use this command.")
             return
         from bong_utilities.manage_memory import search_memories, list_memories
-        await asyncio.to_thread(ctx.typing().__aenter__) if hasattr(ctx, 'typing') else None
-        if query:
-            result = await asyncio.to_thread(search_memories, query)
-        else:
-            result = await asyncio.to_thread(list_memories)
-        if len(result) > 2000:
-            for chunk in [result[i:i+2000] for i in range(0, len(result), 2000)]:
-                await ctx.send(chunk)
-        else:
-            await ctx.send(result)
+        async with ctx.typing():
+            if query:
+                result = await asyncio.to_thread(search_memories, query)
+            else:
+                result = await asyncio.to_thread(list_memories)
+            if len(result) > 2000:
+                for chunk in [result[i:i+2000] for i in range(0, len(result), 2000)]:
+                    await ctx.send(chunk)
+            else:
+                await ctx.send(result)
 
     @commands.command(name="forget_user", help="Delete all memories for a user")
     async def forget_user_cmd(self, ctx, user_id: int):

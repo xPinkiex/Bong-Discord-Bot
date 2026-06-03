@@ -18,7 +18,6 @@ from voice_commands import (
     WHISPER_SAMPLE_RATE,
     WHISPER_CHANNELS,
     WAKE_WORD,
-    FRAME_SIZE,
     OWW_FRAME_BYTES,
     PEAK_THRESHOLD,
 )
@@ -434,7 +433,7 @@ class TestSilencePacketHandling:
         data.packet = SilencePacket(ssrc=1, timestamp=100)
 
         sink.write(user, data)
-        assert len(sink._buffers[123]) == 0
+        assert 123 not in sink._buffers
 
     def test_silence_packet_not_fed_to_oww(self):
         sink = BongVoiceSink(MagicMock(), MagicMock(), MagicMock(), MagicMock())

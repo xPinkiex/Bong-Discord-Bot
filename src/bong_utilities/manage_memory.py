@@ -230,7 +230,9 @@ if __name__ == "__main__":
                 if confirm != "y":
                     print("Cancelled.")
                     sys.exit()
-                print(delete_memory_by_query(args.delete, user_id=args.user))
+                collection.delete(ids=[doc.id])
+                print(f"Deleted memory at index {args.delete}.")
+                sys.exit()
             else:
                 print(delete_memory_by_query(args.delete, user_id=args.user))
         else:

@@ -19,10 +19,6 @@ def load_song_stats():
     _song_stats = dict(_store.data)
 
 
-def _save_song_stats():
-    _store.flush()
-
-
 def _increment_song(title: str):
     _song_stats[title] = _song_stats.get(title, 0) + 1
     _store.mark_dirty()
@@ -37,4 +33,9 @@ def _get_total_plays() -> int:
     return sum(_song_stats.values())
 
 
-import bong_song_stats
+def get_top_songs(n: int = 3) -> list[tuple[str, int]]:
+    return _get_top_songs(n)
+
+
+def get_total_plays() -> int:
+    return _get_total_plays()
