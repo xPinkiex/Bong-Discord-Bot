@@ -11,7 +11,7 @@
 import discord
 import asyncio
 import base64
-import random
+
 import re
 import time
 from datetime import datetime
@@ -69,6 +69,8 @@ active_channels = set()
 # Per-user cooldown for voice commands (user_id -> timestamp of last processed command)
 _voice_cooldowns: dict[int, float] = {}
 VOICE_COOLDOWN_SECONDS = 5
+# Channels with an active background summarization task (prevents double-summarization)
+_summarization_in_progress: set[int] = set()
 
 # Permission tiers are managed in dm_approval (users.json + OWNER_ID)
 # - admin:     full access (shutdown, @llm, @reload, @poweroff, DMs)
@@ -545,36 +547,16 @@ def _make_after_play_callback(guild, loop):
                 return
         except Exception:
             return
-        # If there's a pending action (skip, stop, new play), let the dispatch loop handle it
         if bong_tools.pending_play_audio or bong_tools.pending_skip or bong_tools.pending_stop:
             return
         try:
-            # 1) Queue: pop next song
-            if bong_tools.song_queue:
-                next_track = bong_tools.song_queue.pop(0)
-                bong_tools.current_track = next_track
+            next_track, _desc = bong_tools.advance_queue()
+            if next_track:
                 bong_song_stats._increment_song(Path(next_track).stem)
                 vc.play(discord.FFmpegPCMAudio(next_track, options="-filter:a volume=0.3"), after=after_play)
                 asyncio.run_coroutine_threadsafe(_set_voice_status(guild, _build_now_playing_status()), loop)
-                return
-            # 2) Loop mode: replay the current track
-            if bong_tools.loop_enabled and bong_tools.current_track:
-                vc.play(discord.FFmpegPCMAudio(bong_tools.current_track, options="-filter:a volume=0.3"), after=after_play)
-                asyncio.run_coroutine_threadsafe(_set_voice_status(guild, _build_now_playing_status()), loop)
-                return
-            # 3) Shuffle mode: pick a random track from library
-            if bong_tools.shuffle_enabled:
-                files = list(bong_tools.DOWNLOAD_DIR.glob("*.mp3"))
-                if files:
-                    next_track = random.choice(files)
-                    bong_tools.current_track = str(next_track)
-                    bong_song_stats._increment_song(next_track.stem)
-                    vc.play(discord.FFmpegPCMAudio(bong_tools.current_track, options="-filter:a volume=0.3"), after=after_play)
-                    asyncio.run_coroutine_threadsafe(_set_voice_status(guild, _build_now_playing_status()), loop)
-                    return
-            # Nothing to continue — clear current track and status
-            bong_tools.current_track = None
-            asyncio.run_coroutine_threadsafe(_set_voice_status(guild, None), loop)
+            else:
+                asyncio.run_coroutine_threadsafe(_set_voice_status(guild, None), loop)
         except Exception as e:
             debug.log("Audio", f"Auto-continue error: {e}")
     return after_play
@@ -603,9 +585,13 @@ def _build_now_playing_status():
         return None
     name = Path(bong_tools.current_track).stem
     status = f"🎵 {name}"
-    if bong_tools.loop_enabled:
+    if bong_tools.loop_enabled and bong_tools.queue_snapshot:
+        status += " 🔁Q"
+    elif bong_tools.loop_enabled and bong_tools.loop_track:
         status += " 🔁"
-    elif bong_tools.shuffle_enabled:
+    elif bong_tools.loop_enabled:
+        status += " 🔁"
+    if bong_tools.shuffle_enabled:
         status += " 🔀"
     return status
 
@@ -685,6 +671,9 @@ async def _dispatch_play_audio(guild):
     try:
         track_path = bong_tools.pending_play_audio
         bong_tools.current_track = track_path
+        # Bind deferred loop track now that we have a current track
+        if bong_tools.loop_enabled and not bong_tools.loop_track and not bong_tools.queue_snapshot:
+            bong_tools.loop_track = track_path
         after_play = _make_after_play_callback(guild, asyncio.get_running_loop())
         # If something is already playing, stop it first and wait briefly
         if vc.is_playing() or vc.is_paused():
@@ -702,16 +691,20 @@ async def _dispatch_play_audio(guild):
 
 
 async def _dispatch_loop_audio(guild):
-    """Handle loop track start by stopping current playback and queuing the loop track."""
-    if not (bong_tools.loop_enabled and bong_tools.loop_track):
+    """Handle loop track start when nothing is currently playing.
+    
+    If audio is already playing, after_play will handle loop continuation — 
+    stopping and restarting here would cause the current song to replay from
+    the beginning on every dispatch cycle.
+    """
+    if not bong_tools.loop_enabled or not bong_tools.loop_track:
         return None
     vc = guild.voice_client if guild else None
     if not vc or not vc.is_connected():
         bong_tools.loop_track = None
         return None
-    # Stop current playback so the after_play callback doesn't interfere
     if vc.is_playing() or vc.is_paused():
-        await _stop_playback(vc)
+        return None
     bong_tools.current_track = bong_tools.loop_track
     bong_tools.pending_play_audio = bong_tools.loop_track
     bong_tools.loop_track = None
@@ -753,6 +746,8 @@ async def _dispatch_stop_audio(guild):
     # Reset all playback state when stopping
     bong_tools.loop_enabled = False
     bong_tools.loop_track = None
+    bong_tools.queue_snapshot = []
+    bong_tools.shuffle_enabled = False
     bong_tools.current_track = None
     bong_tools.song_queue.clear()
     vc = guild.voice_client if guild else None
@@ -778,10 +773,6 @@ async def _dispatch_skip_audio(guild):
     if not bong_tools.pending_skip_target:
         bong_tools.pending_skip = False
         return "No music files to skip to."
-    # Consume the queue item that was only peeked at by skip_audio
-    if bong_tools.song_queue and bong_tools.song_queue[0] == bong_tools.pending_skip_target:
-        bong_tools.song_queue.pop(0)
-    # Set the skip target as the next track and stop current playback
     bong_tools.current_track = str(bong_tools.pending_skip_target)
     bong_tools.pending_play_audio = str(bong_tools.pending_skip_target)
     await _stop_playback(vc)
@@ -935,16 +926,35 @@ async def summarize_history_chunk(text: str) -> str:
     return _extract_response_text(response).strip()
 
 
+async def _summarize_and_trim(channel_id: int, to_summarize: list[str]):
+    """Background task: summarize old messages and trim them from history."""
+    try:
+        summary_text = "\n".join(to_summarize)
+        try:
+            summary = await summarize_history_chunk(summary_text)
+            if summary:
+                channel_summaries.setdefault(channel_id, []).append(summary)
+                if len(channel_summaries[channel_id]) > MAX_SUMMARIES_PER_CHANNEL:
+                    channel_summaries[channel_id] = channel_summaries[channel_id][-MAX_SUMMARIES_PER_CHANNEL:]
+                debug.log("AI", f"Summarized {len(to_summarize)} messages for channel {channel_id}")
+        except Exception as e:
+            debug.log("AI", f"Background summarization failed: {e}")
+        history = chat_memories.get(channel_id)
+        if history and len(history) >= SUMMARIZE_CHUNK_SIZE:
+            history[-SUMMARIZE_CHUNK_SIZE:] = []
+    finally:
+        _summarization_in_progress.discard(channel_id)
+
+
 def record_history(history, message, result, attachment_desc, tool_summaries):
-    """Store the exchange in the channel's rolling history, evicting the oldest entry if at capacity.
+    """Store the exchange in the channel's rolling history.
     
     The history is stored newest-first (index 0 = most recent).
+    Trimming is handled by background summarization — see _summarize_and_trim.
     """
     attachment_suffix = f" {attachment_desc}" if attachment_desc != "None" else ""
     tool_summary_str = f" [Already completed: {'; '.join(tool_summaries)}]" if tool_summaries else ""
     history_entry = f"{message.author.display_name} at {datetime.now().strftime('%H:%M')}: {message.content.replace(chr(10), '. ')}{attachment_suffix}\nBong's response: {result.replace(chr(10), '. ')}{tool_summary_str}"
-    if len(history) >= MAX_MEMORY_SIZE:
-        history.pop()
     history.insert(0, history_entry)
     debug.log("AI", f"response {len(history)}")
     debug.log_to_file("AI", f"RESPONSE: {result}")
@@ -955,12 +965,11 @@ def record_passive_message(history, message, attachment_desc):
     
     Even messages not directed at Bong are recorded so the classifier and LLM
     have recent conversation context to work with.
+    Trimming is handled by background summarization — see _summarize_and_trim.
     """
     attachment_suffix = f" {attachment_desc}" if attachment_desc != "None" else ""
     history_entry = f"{message.author.display_name} at {datetime.now().strftime('%H:%M')}: {message.content.replace(chr(10), '. ')}{attachment_suffix}"
     history.insert(0, history_entry)
-    if len(history) >= MAX_MEMORY_SIZE:
-        history.pop()
     debug.log("AI", f"remembered {len(history)}")
 
 
@@ -1028,8 +1037,6 @@ async def process_voice_command(bot, guild, channel, user_id: int, username: str
 
         # Record in history
         history_entry = f"{username} at {datetime.now().strftime('%H:%M')} (voice): {text}\nBong's response: {result.replace(chr(10), '. ')}"
-        if len(history) >= MAX_MEMORY_SIZE:
-            history.pop()
         history.insert(0, history_entry)
         debug.log("AI", f"voice response recorded {len(history)}")
 
@@ -1209,23 +1216,11 @@ class BongCog(commands.Cog):
         # Get or create the channel's rolling history
         history = chat_memories.setdefault(message.channel.id, [])
 
-        # Summarize oldest messages if history exceeds the threshold
-        if len(history) >= MAX_MEMORY_SIZE:
-            # Take the oldest SUMMARIZE_CHUNK_SIZE messages (last in the list since newest is first)
-            to_summarize = history[-SUMMARIZE_CHUNK_SIZE:]
-            summary_text = "\n".join(to_summarize)
-            try:
-                summary = await summarize_history_chunk(summary_text)
-                if summary:
-                    channel_summaries.setdefault(message.channel.id, []).append(summary)
-                    # Keep only the most recent summaries per channel
-                    if len(channel_summaries[message.channel.id]) > MAX_SUMMARIES_PER_CHANNEL:
-                        channel_summaries[message.channel.id] = channel_summaries[message.channel.id][-MAX_SUMMARIES_PER_CHANNEL:]
-                    debug.log("AI", f"Summarized {len(to_summarize)} messages for channel {message.channel.id}")
-            except Exception as e:
-                debug.log("AI", f"Summarization failed: {e}")
-            # Remove the summarized messages from history
-            history[-SUMMARIZE_CHUNK_SIZE:] = []
+        # Kick off background summarization if history exceeds the threshold
+        if len(history) >= MAX_MEMORY_SIZE and message.channel.id not in _summarization_in_progress:
+            _summarization_in_progress.add(message.channel.id)
+            to_summarize = list(history[-SUMMARIZE_CHUNK_SIZE:])
+            asyncio.create_task(_summarize_and_trim(message.channel.id, to_summarize))
 
         # Grab the last 7 messages for the classifier's context window
         recent_messages = history[:7]

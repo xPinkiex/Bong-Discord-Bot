@@ -1,4 +1,3 @@
-import random
 import re
 from datetime import datetime
 from functools import wraps
@@ -16,7 +15,7 @@ import bong_song_stats
 
 
 def _fuzzy_match_music(files, name):
-    return [(i, f) for i, f in enumerate(files) if name in f.stem.lower() or f.stem.lower() in name]
+    return [(i, f) for i, f in enumerate(files) if name in f.stem.lower()]
 
 
 def _requires_voice(func):
@@ -71,7 +70,7 @@ def download_music(query: str) -> str:
             return f"YouTube search failed: {e}"
 
     try:
-        with YoutubeDL({"quiet": True, "no_warnings": True}) as probe:
+        with YoutubeDL({"quiet": True, "no_warnings": True, "noplaylist": True}) as probe:
             info = probe.extract_info(url, download=False)
             title = str(info.get("title", "unknown") or "unknown")
             clean_title = re.sub(r'[^\w\s\[\]\(\)\{\}]', '', title).strip()
@@ -174,6 +173,13 @@ def play_audio(index: int = -1, name: str = "") -> str:
     if bong_tools.current_track or bong_tools.pending_play_audio:
         bong_tools.song_queue.append(track_path)
         pos = len(bong_tools.song_queue)
+        if bong_tools.loop_enabled and bong_tools.loop_track and not bong_tools.queue_snapshot:
+            bong_tools.queue_snapshot = [bong_tools.loop_track] + list(bong_tools.song_queue)
+            bong_tools.loop_track = None
+            return f"Added '{track_name}' to the queue (position {pos}). Queue loop activated ({len(bong_tools.queue_snapshot)} songs)."
+        if bong_tools.loop_enabled and bong_tools.queue_snapshot:
+            bong_tools.queue_snapshot.append(track_path)
+            return f"Added '{track_name}' to the queue (position {pos}, loop has {len(bong_tools.queue_snapshot)} songs)."
         return f"Added '{track_name}' to the queue (position {pos})."
     bong_tools.pending_play_audio = track_path
     bong_song_stats._increment_song(track_name)
@@ -201,73 +207,73 @@ def resume_audio() -> str:
 @tool
 @_requires_voice
 def stop_audio() -> str:
-    """Stop audio playback in voice chat entirely and clear the song queue. Only use this if the user is in a voice channel — if they are not, tell them to join one and do not call this tool.
+    """Stop audio playback in voice chat entirely and clear the song queue, loop, and shuffle state. Only use this if the user is in a voice channel — if they are not, tell them to join one and do not call this tool.
     """
     bong_tools.pending_stop = True
     bong_tools.song_queue.clear()
+    bong_tools.loop_enabled = False
+    bong_tools.loop_track = None
+    bong_tools.queue_snapshot = []
+    bong_tools.shuffle_enabled = False
     return "Stopping audio and clearing the queue."
 
 
 @tool
 @_requires_voice
 def skip_audio() -> str:
-    """Skip the currently playing song and play the next one in the queue. If the queue is empty and shuffle is on, picks a random song from the library. Only use this if the user is in a voice channel — if they are not, tell them to join one and do not call this tool.
+    """Skip the currently playing song and play the next one in the queue. If loop is on, wraps around. If shuffle is on, picks randomly. Only use this if the user is in a voice channel.
     """
     bong_tools.pending_skip = True
-    if bong_tools.song_queue:
-        next_track = bong_tools.song_queue[0]
+    next_track, _desc = bong_tools.advance_queue()
+    if next_track:
         bong_tools.pending_skip_target = next_track
         bong_song_stats._increment_song(Path(next_track).stem)
         return f"Skipping to '{Path(next_track).stem}'."
-    bong_tools.refresh_music_library()
-    files = bong_tools.music_library
-    if bong_tools.shuffle_enabled and files:
-        next_track = random.choice(files)
-        bong_tools.pending_skip_target = str(next_track)
-        bong_song_stats._increment_song(next_track.stem)
-        return f"Skipping to random track '{next_track.stem}'."
     bong_tools.pending_skip_target = None
-    return "Queue is empty and shuffle is off. Add songs to the queue or enable shuffle."
+    return "Queue is empty. Add songs to the queue, enable loop, or enable shuffle."
 
 
 @tool
 @_requires_voice
-def loop_audio(index: int = -1) -> str:
-    """Loop the current song or a specific song by index. Only use this if the user is in a voice channel — if they are not, tell them to join one and do not call this tool. When enabled, the song will replay from the beginning when it finishes. Loop takes priority over shuffle. Call again to disable loop.
+def loop_audio(enabled: bool) -> str:
+    """Toggle loop mode. When enabled with 1 song playing, loops that track. When enabled with 2+ songs (current + queue), loops the entire queue. Loop and shuffle can be combined — enabling both on a queue plays it in shuffled order endlessly.
     Args:
-        index: The index number of the track from list_music to loop. If not provided or -1, loops the currently playing song.
+        enabled: True to enable loop, False to disable.
     """
-    if bong_tools.loop_enabled:
+    if not enabled:
         bong_tools.loop_enabled = False
         bong_tools.loop_track = None
+        bong_tools.queue_snapshot = []
         return "Loop disabled."
-    if index >= 0:
-        files = bong_tools.music_library
-        if not files:
-            return "No music files available. Download some first."
-        if index >= len(files):
-            return f"Index {index} out of range. Use list_music to see available tracks (0-{len(files)-1})."
-        bong_tools.loop_enabled = True
-        bong_tools.shuffle_enabled = False
-        bong_tools.loop_track = str(files[index])
-        return f"Looping '{files[index].stem}'."
     bong_tools.loop_enabled = True
-    bong_tools.shuffle_enabled = False
-    bong_tools.loop_track = None
-    return "Looping the current song."
+    if (bong_tools.current_track or bong_tools.pending_play_audio) and (bong_tools.queue_snapshot or bong_tools.song_queue):
+        songs = []
+        if bong_tools.current_track:
+            songs.append(bong_tools.current_track)
+        elif bong_tools.pending_play_audio:
+            songs.append(bong_tools.pending_play_audio)
+        songs.extend(bong_tools.song_queue)
+        bong_tools.queue_snapshot = list(songs)
+        bong_tools.loop_track = None
+        return f"Looping the queue ({len(songs)} song(s))."
+    if bong_tools.current_track or bong_tools.pending_play_audio:
+        bong_tools.loop_track = bong_tools.current_track or bong_tools.pending_play_audio
+        bong_tools.queue_snapshot = []
+        if bong_tools.loop_track:
+            return f"Looping '{Path(bong_tools.loop_track).stem}'."
+        return "Looping the current song (will bind when playback starts)."
+    bong_tools.loop_enabled = False
+    return "Nothing is playing. Play a song first before enabling loop."
 
 
 @tool
 @_requires_voice
 def music_shuffle_enabled(enabled: bool) -> str:
-    """Enable or disable shuffle mode for music playback. Only use this if the user is in a voice channel — if they are not, tell them to join one and do not call this tool. When enabled, after a song finishes a random mp3 from the saved_sounds folder will play next. Disables loop if enabled.
+    """Enable or disable shuffle mode. Only use this if the user is in a voice channel — if they are not, tell them to join one and do not call this tool. When enabled with a queue, picks the next song randomly. When enabled without a queue, picks a random song from the library. Can be combined with loop for a shuffled queue loop.
     Args:
         enabled: True to enable shuffle, False to disable shuffle.
     """
     bong_tools.shuffle_enabled = enabled
-    if enabled:
-        bong_tools.loop_enabled = False
-        bong_tools.loop_track = None
     state = "enabled" if enabled else "disabled"
     return f"Shuffle mode is now {state}."
 
@@ -289,8 +295,12 @@ def queue() -> str:
     else:
         lines.append("Queue is empty.")
     state_parts = []
-    if bong_tools.loop_enabled:
-        state_parts.append("loop on")
+    if bong_tools.loop_enabled and bong_tools.queue_snapshot:
+        state_parts.append(f"loop: queue ({len(bong_tools.queue_snapshot)} songs)")
+    elif bong_tools.loop_enabled and bong_tools.loop_track:
+        state_parts.append("loop: track")
+    elif bong_tools.loop_enabled:
+        state_parts.append("loop: on")
     if bong_tools.shuffle_enabled:
         state_parts.append("shuffle on")
     if state_parts:
@@ -301,10 +311,13 @@ def queue() -> str:
 @tool
 @_requires_voice
 def clear_queue() -> str:
-    """Clear all songs from the queue without stopping the currently playing song. Only use this if the user is in a voice channel — if they are not, tell them to join one and do not call this tool.
+    """Clear all songs from the queue without stopping the currently playing song. If queue loop is active, it is also disabled. Only use this if the user is in a voice channel — if they are not, tell them to join one and do not call this tool.
     """
     count = len(bong_tools.song_queue)
     bong_tools.song_queue.clear()
+    if bong_tools.loop_enabled and bong_tools.queue_snapshot:
+        bong_tools.loop_enabled = False
+        bong_tools.queue_snapshot = []
     if count:
         return f"Cleared {count} song(s) from the queue."
     return "The queue is already empty."
