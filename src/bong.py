@@ -41,6 +41,7 @@ import persist
 import reminders
 import user_data
 import voice_commands
+import bong_e621
 
 # --- LLM Models ---
 # The classifier model is fast and cheap — it only needs to output YES/NO
@@ -1095,6 +1096,8 @@ class BongCog(commands.Cog):
         self.reminder_task = self.bot.loop.create_task(self._check_reminders())
         # Start the periodic persist flush task
         self.persist_task = self.bot.loop.create_task(self._flush_persist_periodically())
+        # Start the e621 subscription checker background task
+        self.e621_task = self.bot.loop.create_task(self._check_e621_subscriptions())
 
     async def _flush_persist_periodically(self):
         """Flush all persist stores to disk every 60 seconds if dirty."""
@@ -1108,6 +1111,7 @@ class BongCog(commands.Cog):
         persist.flush_all()
         self.reminder_task.cancel()
         self.persist_task.cancel()
+        self.e621_task.cancel()
     
     async def _preload_channel(self):
         """Load recent message history from debug channels on startup so Bong has context."""
@@ -1155,6 +1159,44 @@ class BongCog(commands.Cog):
             except Exception as e:
                 debug.log("Reminders", f"Error checking reminders: {e}")
             await asyncio.sleep(30)
+
+    async def _check_e621_subscriptions(self):
+        """Background task that polls e621 for new posts matching subscribed tags and DMs users."""
+        await self.bot.wait_until_ready()
+        bong_e621.load_subscriptions()
+        while not self.bot.is_closed():
+            if bong_e621.tag_registry:
+                debug.log("e621", f"Polling {len(bong_e621.tag_registry)} tag(s)")
+            dirty = False
+            for tags, last_id in list(bong_e621.tag_registry.items()):
+                try:
+                    new_posts, new_id = bong_e621.get_new_posts(tags, last_id)
+                    if new_id != last_id:
+                        bong_e621.tag_registry[tags] = new_id
+                        dirty = True
+                    if new_posts:
+                        subscriber_ids = user_data.get_all_e621_subscribers(tags)
+                        lines = [f"New e621 post matching '{tags}':"]
+                        for p in new_posts[:5]:
+                            pid = p.get("id", "?")
+                            score = p.get("score", {}).get("total", 0)
+                            rating = p.get("rating", "?")
+                            lines.append(f"  #{pid} [score:{score} rating:{rating}] https://e621.net/posts/{pid}")
+                        msg = "\n".join(lines)
+                        for uid in subscriber_ids:
+                            try:
+                                user = self.bot.get_user(uid) or await self.bot.fetch_user(uid)
+                                await user.send(msg)
+                            except discord.Forbidden:
+                                pass
+                            except Exception as e:
+                                debug.log("e621", f"Could not DM user {uid}: {e}")
+                except Exception as e:
+                    debug.log("e621", f"Error polling tag '{tags}': {e}")
+                await asyncio.sleep(1)
+            if dirty:
+                bong_e621.save_subscriptions()
+            await asyncio.sleep(bong_e621.E621_POLL_INTERVAL)
 
     @commands.Cog.listener()
     async def on_message(self, message):

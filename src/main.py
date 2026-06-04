@@ -51,6 +51,7 @@ def _check_ollama_available(ollama_host=None, timeout=30):
                 debug.log("Ollama", f"Ollama is available at {ollama_host}")
                 return
         except (urllib.error.URLError, ConnectionRefusedError, OSError):
+            debug.log("Ollama", f"Ollama not reachable at {url}, retrying...")
             time.sleep(0.5)
     raise RuntimeError(
         f"Ollama is not running at {url}. "
@@ -198,7 +199,7 @@ def main():
             # Skip _active_listeners and _is_listening from voice_commands — they hold stale references
             _skip_attrs = {"voice_commands": {"_active_listeners", "_is_listening"}}
             snapshots = {}
-            for mod in [util, util + "_tools", util + "_music", util + "_memory", util + "_web", util + "_state", "debug", "dm_approval", "reminders", "user_data", "voice_commands"]:
+            for mod in [util, util + "_tools", util + "_music", util + "_memory", util + "_web", util + "_state", util + "_e621", "debug", "dm_approval", "reminders", "user_data", "voice_commands"]:
                 if mod in sys.modules:
                     skip = _skip_attrs.get(mod, set())
                     # Save all non-function, non-module, non-class attributes (i.e. runtime state)

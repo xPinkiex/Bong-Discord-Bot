@@ -191,3 +191,46 @@ def parse_timezone(text: str) -> float | None:
 
 def known_user_count() -> int:
     return len(_user_data)
+
+
+# ---- e621 subscription helpers ----
+
+def get_e621_subs(user_id: int) -> list[str]:
+    """Get a user's e621 tag subscriptions as a list of tag strings."""
+    entry = _user_data.get(user_id)
+    if entry is None:
+        return []
+    return entry.get("e621_subs", [])
+
+
+def add_e621_sub(user_id: int, tags: str):
+    """Add an e621 tag subscription for a user. Tags should be pre-normalized (lowercase, stripped)."""
+    entry = _user_data.setdefault(user_id, {})
+    subs = entry.get("e621_subs", [])
+    if tags not in subs:
+        subs.append(tags)
+        entry["e621_subs"] = subs
+        _store.mark_dirty()
+
+
+def remove_e621_sub(user_id: int, tags: str):
+    """Remove an e621 tag subscription for a user. Returns True if found and removed."""
+    entry = _user_data.get(user_id)
+    if entry is None:
+        return False
+    subs = entry.get("e621_subs", [])
+    if tags in subs:
+        subs.remove(tags)
+        entry["e621_subs"] = subs
+        _store.mark_dirty()
+        return True
+    return False
+
+
+def get_all_e621_subscribers(tags: str) -> list[int]:
+    """Get all user IDs subscribed to a given tag string."""
+    result = []
+    for uid, entry in _user_data.items():
+        if tags in entry.get("e621_subs", []):
+            result.append(uid)
+    return result

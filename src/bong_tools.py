@@ -54,7 +54,8 @@ from bong_music import tools as _music_tools
 from bong_memory import tools as _memory_tools
 from bong_web import tools as _web_tools
 from bong_state import tools as _state_tools
-tools = _music_tools + _memory_tools + _web_tools + _state_tools
+from bong_e621 import tools as _e621_tools
+tools = _music_tools + _memory_tools + _web_tools + _state_tools + _e621_tools
 tool_map = {t.name: t for t in tools}
 
 

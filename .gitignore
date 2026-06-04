@@ -39,9 +39,9 @@ approved_dm_users.json
 .DS_Store
 Thumbs.db
 
-# Continue
-.continue/
-
 # Opencode
 opencode.json
 CONTEXT.md
+
+# todo
+todo.txt
