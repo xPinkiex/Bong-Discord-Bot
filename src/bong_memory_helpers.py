@@ -39,7 +39,8 @@ RECENCY_BOOST = 0.15
 RECENCY_HALFLIFE_DAYS = 60.0
 CONTRADICTION_THRESHOLD = 0.75
 NEAR_DUPLICATE_THRESHOLD = 0.92
-MIN_RELEVANCE = 0.5
+MIN_RELEVANCE_USER = 0.3
+MIN_RELEVANCE_GENERAL = 0.5
 CONTRADICTION_MODEL = "gemma3:12b-cloud"
 _contradiction_model = ChatOllama(model=CONTRADICTION_MODEL, temperature=0.0, num_predict=5, keep_alive=-1)
 
@@ -190,7 +191,7 @@ def retrieve_memories(query: str, user_id: int, about_name: str = "", k: int = 1
             cleaned_query, k=k, filter={"user_id": target_user_id}
         )
         for doc, score in user_results:
-            if score < MIN_RELEVANCE:
+            if score < MIN_RELEVANCE_USER:
                 continue
             doc_id = doc.id if hasattr(doc, 'id') else doc.metadata.get("id")
             norm = doc.page_content.strip().lower()
@@ -217,7 +218,7 @@ def retrieve_memories(query: str, user_id: int, about_name: str = "", k: int = 1
             cleaned_query, k=k * 3
         )
         for doc, score in general_results:
-            if score < MIN_RELEVANCE:
+            if score < MIN_RELEVANCE_GENERAL:
                 continue
             doc_id = doc.id if hasattr(doc, 'id') else doc.metadata.get("id")
             norm = doc.page_content.strip().lower()

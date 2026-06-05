@@ -10,10 +10,14 @@ Usage:
     python -m bong_utilities.manage_memory -d 3           Delete memory #3
     python -m bong_utilities.manage_memory --forget-user Eve  Delete all of Eve's memories
     python -m bong_utilities.manage_memory --expire       Remove expired memories
+    python -m bong_utilities.manage_memory --backup       Back up all memories
+    python -m bong_utilities.manage_memory --restore backup.json  Restore from backup
     python -m bong_utilities.manage_memory -d 3 --dry-run  Preview without changes
 """
 
 import argparse
+import json
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -91,6 +95,41 @@ def _get_all_memories(user_id: int | None = None) -> list[tuple]:
             continue
         items.append((doc_id, text, meta))
     return items
+
+
+BACKUP_DIR = bong_memory_helpers.bong_tools.BONG_DATA / "chroma_backups"
+BACKUP_REQUIRED_KEYS = {"ids", "documents", "metadatas", "embeddings"}
+EMBEDDING_MODEL = "nomic-embed-text"
+
+
+def _check_ollama() -> bool:
+    """Check if Ollama is reachable at OLLAMA_HOST. Returns True if reachable."""
+    import urllib.request
+    import urllib.error
+
+    host = os.getenv("OLLAMA_HOST", "127.0.0.1:11434")
+    if not host.startswith("http"):
+        host = f"http://{host}"
+    url = f"{host.rstrip('/')}/api/tags"
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status == 200
+    except (urllib.error.URLError, OSError, TimeoutError):
+        return False
+
+
+def _auto_backup() -> str | None:
+    """Run an automatic backup before a destructive operation.
+    Returns the backup file path on success, None on failure.
+    Prints a warning on failure but does not raise.
+    """
+    try:
+        args = argparse.Namespace(backup=True)
+        return cmd_backup(args, _quiet=True)
+    except Exception as e:
+        print(f"{YELLOW}Warning: auto-backup failed ({e}). Proceeding anyway.{RESET}")
+        return None
 
 
 def _resolve_user(arg: str) -> tuple[int | None, str | None]:
@@ -435,6 +474,7 @@ def cmd_edit(args):
     collection = _get_collection()
 
     if "text" in changes:
+        _auto_backup()
         clean_new = bong_memory_helpers._clean_for_embedding(changes["text"])
         collection.delete(ids=[doc_id])
         bong_memory_helpers._vector_db.add_texts([clean_new], metadatas=[new_meta])
@@ -486,7 +526,7 @@ def cmd_delete(args):
         print()
         shown = 0
         for doc, score in results:
-            if score < bong_memory_helpers.MIN_RELEVANCE:
+            if score < bong_memory_helpers.MIN_RELEVANCE_GENERAL:
                 continue
             shown += 1
             m = doc.metadata
@@ -534,6 +574,8 @@ def cmd_delete(args):
         print("Cancelled.")
         return
 
+    _auto_backup()
+
     collection = _get_collection()
     doc_ids = [d[0] for d in to_delete if d[0]]
     if doc_ids:
@@ -574,6 +616,8 @@ def cmd_forget_user(args):
     if confirm_name != display_name:
         print("Cancelled.")
         return
+
+    _auto_backup()
 
     collection = _get_collection()
     doc_ids = [d[0] for d in items if d[0]]
@@ -626,8 +670,183 @@ def cmd_expire(args):
         print("Cancelled.")
         return
 
+    _auto_backup()
+
     collection.delete(ids=[d[0] for d in expired])
     print(f"{GREEN}Deleted {len(expired)} expired memories.{RESET}")
+
+
+def cmd_backup(args, _quiet=False):
+    """Export all memories to a JSON file with embeddings.
+    Returns the backup file path on success.
+    """
+    collection = _get_collection()
+    result = collection.get(include=["documents", "metadatas", "embeddings"])
+    if not result["ids"]:
+        if not _quiet:
+            print(f"{YELLOW}No memories to back up.{RESET}")
+        return None
+
+    embeddings = []
+    raw_embeddings = result.get("embeddings")
+    if raw_embeddings is not None and len(raw_embeddings) > 0:
+        for emb in raw_embeddings:
+            if emb is not None:
+                embeddings.append([float(v) for v in emb])
+            else:
+                embeddings.append(None)
+
+    backup = {
+        "ids": result["ids"],
+        "documents": result["documents"],
+        "metadatas": result["metadatas"],
+        "embeddings": embeddings,
+        "backup_time": datetime.now().timestamp(),
+        "memory_count": len(result["ids"]),
+        "model": EMBEDDING_MODEL,
+    }
+
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"memory_backup_{timestamp}.json"
+    filepath = BACKUP_DIR / filename
+
+    tmp_path = filepath.with_suffix(".json.tmp")
+    try:
+        with open(tmp_path, "w") as f:
+            json.dump(backup, f, indent=2)
+        os.rename(tmp_path, filepath)
+    except OSError as e:
+        tmp_path.unlink(missing_ok=True)
+        if not _quiet:
+            print(f"{RED}Backup failed: {e}{RESET}")
+        return None
+
+    if not _quiet:
+        print(f"{GREEN}Backed up {len(result['ids'])} memories to {filepath}{RESET}")
+    return str(filepath)
+
+
+def cmd_restore(args):
+    """Restore memories from a backup JSON file."""
+    path = Path(args.restore)
+    if not path.exists():
+        print(f"{RED}File not found: {path}{RESET}")
+        return
+
+    try:
+        with open(path) as f:
+            backup = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"{RED}Failed to read backup: {e}{RESET}")
+        return
+
+    missing = BACKUP_REQUIRED_KEYS - set(backup.keys())
+    if missing:
+        print(f"{RED}Backup file is missing required keys: {', '.join(sorted(missing))}{RESET}")
+        return
+
+    ids = backup["ids"]
+    documents = backup["documents"]
+    metadatas = backup["metadatas"]
+    embeddings = backup["embeddings"]
+
+    if not ids:
+        print(f"{YELLOW}Backup contains no memories.{RESET}")
+        return
+
+    if len(ids) != len(documents) or len(ids) != len(metadatas) or len(ids) != len(embeddings):
+        print(f"{RED}Backup data is corrupted: array length mismatch "
+              f"(ids={len(ids)}, documents={len(documents)}, "
+              f"metadatas={len(metadatas)}, embeddings={len(embeddings)}){RESET}")
+        return
+
+    ollama_ok = _check_ollama()
+    use_fast = getattr(args, "fast", False)
+    valid_embeddings = None
+
+    if not use_fast and not ollama_ok:
+        print(f"{BOLD_RED}Ollama is unreachable — cannot re-embed memories during restore.{RESET}")
+        print(f"  Either start Ollama, or use --fast to restore with pre-computed embeddings.")
+        return
+
+    if use_fast and not ollama_ok:
+        print(f"{YELLOW}Warning: Ollama is unreachable, but --fast mode doesn't need it.{RESET}")
+
+    if use_fast:
+        valid_embeddings = [e for e in embeddings if e is not None]
+        if len(valid_embeddings) != len(embeddings):
+            print(f"{RED}Backup has {len(embeddings) - len(valid_embeddings)} missing embeddings. "
+                  f"Cannot use --fast mode.{RESET}")
+            print(f"  Re-run without --fast to re-embed all memories.")
+            return
+
+    if ollama_ok and not use_fast:
+        print(f"{DIM}(Ollama reachable — will re-embed {len(ids)} memories){RESET}")
+
+    print(f"{BOLD_YELLOW}Warning: ensure the bot is not running during restore.{RESET}")
+
+    do_drop = getattr(args, "drop", False)
+    collection = _get_collection()
+    existing_result = collection.get(include=["metadatas"])
+    existing_ids = set(existing_result["ids"])
+    backup_id_set = set(ids)
+    colliding_ids = existing_ids & backup_id_set
+
+    if do_drop:
+        drop_msg = f"DROP {len(existing_ids)} existing memories and restore {len(ids)} from backup"
+        confirm_msg = f"{BOLD_RED}Type 'yes' to {drop_msg}:{RESET} "
+    else:
+        if colliding_ids:
+            confirm_msg = f"{BOLD}Type 'yes' to restore {len(ids)} memories ({len(colliding_ids)} will overwrite existing):{RESET} "
+        else:
+            confirm_msg = f"{BOLD}Type 'yes' to restore {len(ids)} memories from {path}:{RESET} "
+
+    confirm = input(f"\n  {confirm_msg}").strip()
+    if confirm != "yes":
+        print("Cancelled.")
+        return
+
+    if colliding_ids:
+        collection.delete(ids=list(colliding_ids))
+
+    restored_count = 0
+    failed_at = None
+
+    if use_fast:
+        try:
+            collection.add(ids=ids, documents=documents, metadatas=metadatas, embeddings=valid_embeddings)
+            restored_count = len(ids)
+        except Exception as e:
+            print(f"{RED}Fast restore failed: {e}{RESET}")
+            return
+    else:
+        for i, (doc_id, doc_text, meta) in enumerate(zip(ids, documents, metadatas)):
+            try:
+                bong_memory_helpers._vector_db.add_texts([doc_text], metadatas=[meta], ids=[doc_id])
+                restored_count += 1
+            except Exception as e:
+                failed_at = i + 1
+                print(f"{RED}Failed to restore memory {failed_at}/{len(ids)}: {e}{RESET}")
+                break
+
+    if do_drop and failed_at is None:
+        extras = existing_ids - set(ids)
+        if extras:
+            try:
+                collection.delete(ids=list(extras))
+                print(f"{DIM}Dropped {len(extras)} memories not in backup.{RESET}")
+            except Exception as e:
+                print(f"{YELLOW}Warning: failed to drop {len(extras)} extra memories: {e}{RESET}")
+                print(f"  The restore succeeded, but some old memories remain.")
+    elif do_drop and failed_at is not None:
+        print(f"{YELLOW}Warning: restore incomplete — skipping drop of {len(existing_ids)} old memories.{RESET}")
+        print(f"  Old memories are still present. Re-run restore to complete.")
+
+    if failed_at is not None:
+        print(f"{YELLOW}Restored {restored_count}/{len(ids)} memories (failed at memory {failed_at}).{RESET}")
+    else:
+        print(f"{GREEN}Restored {restored_count} memories from {path}{RESET}")
 
 
 def main():
@@ -645,7 +864,11 @@ def main():
   %(prog)s -d 5                         Delete memory #5
   %(prog)s -d "old fact" --dry-run      Preview deletion
   %(prog)s --forget-user Eve            Delete all of Eve's memories
-  %(prog)s --expire                     Remove expired memories""",
+  %(prog)s --expire                     Remove expired memories
+  %(prog)s --backup                     Back up all memories to JSON
+  %(prog)s --restore backup.json        Restore from a backup (re-embeds by default)
+  %(prog)s --restore backup.json --fast Restore without re-embedding
+  %(prog)s --restore backup.json --drop Reset DB to backup snapshot""",
     )
     parser.add_argument("-l", "--list", action="store_true", help="List all memories")
     parser.add_argument("-s", "--search", type=str, help="Search memories by query")
@@ -655,10 +878,19 @@ def main():
     parser.add_argument("-d", "--delete", type=str, help="Delete memory(ies) by index or search query")
     parser.add_argument("--forget-user", type=str, metavar="NAME_OR_ID", help="Delete all memories for a user")
     parser.add_argument("--expire", action="store_true", help="Remove memories past their expiration date")
+    parser.add_argument("--backup", action="store_true", help="Back up all memories to JSON (with embeddings)")
+    parser.add_argument("--restore", type=str, metavar="PATH", help="Restore memories from a backup JSON file")
+    parser.add_argument("--drop", action="store_true", help="With --restore: wipe existing DB first (full reset to backup)")
+    parser.add_argument("--fast", action="store_true", help="With --restore: use pre-computed embeddings (skip re-embedding)")
     parser.add_argument("-u", "--user", type=str, help="Filter by user (display name or Discord ID)")
     parser.add_argument("--dry-run", action="store_true", help="Preview changes without making them (works with -d, --forget-user, --expire)")
 
     args = parser.parse_args()
+
+    if args.drop and not args.restore:
+        parser.error("--drop requires --restore")
+    if args.fast and not args.restore:
+        parser.error("--fast requires --restore")
 
     user_data.load_users()
 
@@ -676,6 +908,10 @@ def main():
         cmd_forget_user(args)
     elif args.expire:
         cmd_expire(args)
+    elif args.backup:
+        cmd_backup(args)
+    elif args.restore:
+        cmd_restore(args)
     else:
         parser.print_help()
 

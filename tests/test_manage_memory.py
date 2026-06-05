@@ -41,9 +41,13 @@ class MockCollection:
         self.texts = [d.page_content for d in docs]
         self.metas = [d.metadata for d in docs]
         self._deleted_ids = []
+        self._added = []
 
-    def get(self, **kwargs):
-        return {"ids": self.ids, "documents": self.texts, "metadatas": self.metas}
+    def get(self, include=None, **kwargs):
+        result = {"ids": self.ids, "documents": self.texts, "metadatas": self.metas}
+        if include and "embeddings" in include:
+            result["embeddings"] = [[0.1] * 768 for _ in self.ids]
+        return result
 
     def count(self):
         return len(self.ids)
@@ -54,6 +58,9 @@ class MockCollection:
 
     def update(self, ids=None, metadatas=None):
         pass
+
+    def add(self, ids=None, documents=None, metadatas=None, embeddings=None):
+        self._added.append({"ids": ids, "documents": documents, "metadatas": metadatas, "embeddings": embeddings})
 
 
 def fake_args(**overrides):
@@ -68,6 +75,10 @@ def fake_args(**overrides):
         "expire": False,
         "user": None,
         "dry_run": False,
+        "backup": False,
+        "restore": None,
+        "drop": False,
+        "fast": False,
     }
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -272,6 +283,7 @@ class TestCmdDeleteIndexBug:
         buf = StringIO()
         with patch.object(mm, '_get_all_memories', return_value=items), \
              patch.object(mm, '_get_collection', return_value=col), \
+             patch.object(mm, '_auto_backup', return_value=None), \
              patch('builtins.input', return_value='yes'), \
              patch('sys.stdout', buf):
             mm.cmd_delete(fake_args(delete="1"))
@@ -306,6 +318,7 @@ class TestCmdDeleteIndexBug:
 
         with patch.object(mm, '_get_all_memories', return_value=items), \
              patch.object(mm, '_get_collection', return_value=mock_col), \
+             patch.object(mm, '_auto_backup', return_value=None), \
              patch('builtins.input', return_value='yes'), \
              patch('builtins.print'):
             mm.cmd_delete(fake_args(delete="1"))
@@ -357,6 +370,7 @@ class TestCmdForgetUser:
         with patch.object(mm, '_resolve_user', return_value=(111, "Eve")), \
              patch.object(mm, '_get_all_memories', return_value=items), \
              patch.object(mm, '_get_collection', return_value=mock_col), \
+             patch.object(mm, '_auto_backup', return_value=None), \
              patch('builtins.input', return_value='Eve'), \
              patch('builtins.print'):
             mm.cmd_forget_user(fake_args(forget_user="Eve"))
@@ -443,6 +457,7 @@ class TestCmdExpire:
         col = self._make_col(docs)
         buf = StringIO()
         with patch.object(mm, '_get_collection', return_value=col), \
+             patch.object(mm, '_auto_backup', return_value=None), \
              patch('builtins.input', return_value='yes'), \
              patch('sys.stdout', buf):
             mm.cmd_expire(fake_args(expire=True))
@@ -657,3 +672,474 @@ class TestCmdEdit:
              patch('sys.stdout', buf):
             mm.cmd_edit(fake_args(edit="1"))
         assert "No memories" in buf.getvalue() or "out of range" in buf.getvalue().lower()
+
+
+# ========== cmd_backup ==========
+
+class TestCmdBackup:
+    def test_backup_creates_json(self, tmp_path):
+        col = MockCollection()
+        col.ids = ["m1", "m2"]
+        col.texts = ["memory one", "memory two"]
+        col.metas = [{"category": "fact"}, {"category": "preference"}]
+        with patch.object(mm, '_get_collection', return_value=col), \
+             patch.object(mm, 'BACKUP_DIR', tmp_path):
+            result = mm.cmd_backup(fake_args(backup=True))
+        assert result is not None
+        assert Path(result).exists()
+        import json
+        with open(result) as f:
+            data = json.load(f)
+        assert data["memory_count"] == 2
+        assert data["model"] == "nomic-embed-text"
+        assert len(data["ids"]) == 2
+        assert len(data["embeddings"]) == 2
+
+    def test_backup_empty_db(self):
+        col = MockCollection()
+        buf = StringIO()
+        with patch.object(mm, '_get_collection', return_value=col), \
+             patch('sys.stdout', buf):
+            result = mm.cmd_backup(fake_args(backup=True))
+        assert result is None
+        assert "No memories" in buf.getvalue()
+
+    def test_backup_quiet_mode(self, tmp_path):
+        col = MockCollection()
+        col.ids = ["m1"]
+        col.texts = ["test"]
+        col.metas = [{"category": "fact"}]
+        buf = StringIO()
+        with patch.object(mm, '_get_collection', return_value=col), \
+             patch.object(mm, 'BACKUP_DIR', tmp_path), \
+             patch('sys.stdout', buf):
+            result = mm.cmd_backup(fake_args(backup=True), _quiet=True)
+        assert result is not None
+        assert buf.getvalue() == ""
+
+    def test_backup_file_naming(self, tmp_path):
+        col = MockCollection()
+        col.ids = ["m1"]
+        col.texts = ["test"]
+        col.metas = [{"category": "fact"}]
+        with patch.object(mm, '_get_collection', return_value=col), \
+             patch.object(mm, 'BACKUP_DIR', tmp_path):
+            result = mm.cmd_backup(fake_args(backup=True))
+        filename = Path(result).name
+        assert filename.startswith("memory_backup_")
+        assert filename.endswith(".json")
+
+    def test_backup_atomic_write(self, tmp_path):
+        col = MockCollection()
+        col.ids = ["m1"]
+        col.texts = ["test"]
+        col.metas = [{"category": "fact"}]
+        with patch.object(mm, '_get_collection', return_value=col), \
+             patch.object(mm, 'BACKUP_DIR', tmp_path):
+            result = mm.cmd_backup(fake_args(backup=True))
+        tmp_files = list(tmp_path.glob("*.tmp"))
+        assert len(tmp_files) == 0
+        json_files = list(tmp_path.glob("*.json"))
+        assert len(json_files) == 1
+
+    def test_backup_creates_directory(self, tmp_path):
+        nested = tmp_path / "new_dir"
+        col = MockCollection()
+        col.ids = ["m1"]
+        col.texts = ["test"]
+        col.metas = [{"category": "fact"}]
+        with patch.object(mm, '_get_collection', return_value=col), \
+             patch.object(mm, 'BACKUP_DIR', nested):
+            result = mm.cmd_backup(fake_args(backup=True))
+        assert nested.exists()
+        assert result is not None
+
+    def test_backup_disk_error(self, tmp_path):
+        col = MockCollection()
+        col.ids = ["m1"]
+        col.texts = ["test"]
+        col.metas = [{"category": "fact"}]
+        buf = StringIO()
+        with patch.object(mm, '_get_collection', return_value=col), \
+             patch.object(mm, 'BACKUP_DIR', tmp_path), \
+             patch('builtins.open', side_effect=OSError("disk full")), \
+             patch('sys.stdout', buf):
+            result = mm.cmd_backup(fake_args(backup=True))
+        assert result is None
+        assert "failed" in buf.getvalue().lower()
+
+    def test_backup_preserves_metadata(self, tmp_path):
+        col = MockCollection()
+        col.ids = ["m1"]
+        col.texts = ["test memory"]
+        col.metas = [{"user_id": 111, "user_name": "Eve", "category": "preference", "importance": 5}]
+        with patch.object(mm, '_get_collection', return_value=col), \
+             patch.object(mm, 'BACKUP_DIR', tmp_path):
+            result = mm.cmd_backup(fake_args(backup=True))
+        import json
+        with open(result) as f:
+            data = json.load(f)
+        assert data["metadatas"][0]["user_name"] == "Eve"
+        assert data["metadatas"][0]["importance"] == 5
+
+    def test_backup_no_tmp_on_success(self, tmp_path):
+        col = MockCollection()
+        col.ids = ["m1"]
+        col.texts = ["test"]
+        col.metas = [{"category": "fact"}]
+        with patch.object(mm, '_get_collection', return_value=col), \
+             patch.object(mm, 'BACKUP_DIR', tmp_path):
+            mm.cmd_backup(fake_args(backup=True))
+        tmp_files = list(tmp_path.glob("*.tmp"))
+        assert len(tmp_files) == 0
+
+
+# ========== cmd_restore ==========
+
+class TestCmdRestore:
+    def _make_backup_json(self, tmp_path, ids=None, documents=None, metadatas=None, embeddings=None, extra_keys=None):
+        import json
+        if ids is None:
+            ids = ["m1"]
+        if documents is None:
+            documents = ["test memory"]
+        if metadatas is None:
+            metadatas = [{"category": "fact", "importance": 3}]
+        if embeddings is None:
+            embeddings = [[0.1] * 768 for _ in ids]
+        data = {
+            "ids": ids,
+            "documents": documents,
+            "metadatas": metadatas,
+            "embeddings": embeddings,
+            "backup_time": NOW,
+            "memory_count": len(ids),
+            "model": "nomic-embed-text",
+        }
+        if extra_keys:
+            data.update(extra_keys)
+        path = tmp_path / "backup.json"
+        with open(path, "w") as f:
+            json.dump(data, f)
+        return str(path)
+
+    def test_restore_default_reembed(self, tmp_path):
+        path = self._make_backup_json(tmp_path)
+        mock_db = MagicMock()
+        buf = StringIO()
+        with patch.object(mm, '_check_ollama', return_value=True), \
+             patch.object(bong_memory_helpers, '_vector_db', mock_db), \
+             patch.object(mm, '_get_collection', return_value=MagicMock()), \
+             patch('builtins.input', return_value='yes'), \
+             patch('sys.stdout', buf):
+            mm.cmd_restore(fake_args(restore=path))
+        mock_db.add_texts.assert_called()
+        call_args = mock_db.add_texts.call_args
+        assert "embeddings" not in call_args[1]
+
+    def test_restore_fast_mode(self, tmp_path):
+        path = self._make_backup_json(tmp_path)
+        mock_col = MagicMock()
+        buf = StringIO()
+        with patch.object(mm, '_check_ollama', return_value=False), \
+             patch.object(mm, '_get_collection', return_value=mock_col), \
+             patch('builtins.input', return_value='yes'), \
+             patch('sys.stdout', buf):
+            mm.cmd_restore(fake_args(restore=path, fast=True))
+        mock_col.add.assert_called_once()
+        call_kwargs = mock_col.add.call_args[1]
+        assert "embeddings" in call_kwargs
+
+    def test_restore_file_not_found(self):
+        buf = StringIO()
+        with patch('sys.stdout', buf):
+            mm.cmd_restore(fake_args(restore="/nonexistent/path.json"))
+        assert "not found" in buf.getvalue().lower()
+
+    def test_restore_malformed_json(self, tmp_path):
+        bad_file = tmp_path / "bad.json"
+        bad_file.write_text("not json{{{")
+        buf = StringIO()
+        with patch('sys.stdout', buf):
+            mm.cmd_restore(fake_args(restore=str(bad_file)))
+        assert "failed" in buf.getvalue().lower() or "error" in buf.getvalue().lower()
+
+    def test_restore_missing_keys(self, tmp_path):
+        import json
+        path = tmp_path / "incomplete.json"
+        with open(path, "w") as f:
+            json.dump({"ids": ["m1"], "documents": ["test"]}, f)
+        buf = StringIO()
+        with patch('sys.stdout', buf):
+            mm.cmd_restore(fake_args(restore=str(path)))
+        assert "missing" in buf.getvalue().lower()
+
+    def test_restore_mismatched_lengths(self, tmp_path):
+        path = self._make_backup_json(tmp_path, ids=["m1", "m2"], documents=["only one"], metadatas=[{"category": "fact"}], embeddings=[[0.1] * 768])
+        buf = StringIO()
+        with patch('sys.stdout', buf):
+            mm.cmd_restore(fake_args(restore=path))
+        assert "mismatch" in buf.getvalue().lower() or "corrupted" in buf.getvalue().lower()
+
+    def test_restore_cancelled(self, tmp_path):
+        path = self._make_backup_json(tmp_path)
+        mock_col = MagicMock()
+        buf = StringIO()
+        with patch.object(mm, '_check_ollama', return_value=True), \
+             patch.object(bong_memory_helpers, '_vector_db', MagicMock()), \
+             patch.object(mm, '_get_collection', return_value=mock_col), \
+             patch('builtins.input', return_value='no'), \
+             patch('sys.stdout', buf):
+            mm.cmd_restore(fake_args(restore=path))
+        mock_col.add.assert_not_called()
+        assert "Cancelled" in buf.getvalue()
+
+    def test_restore_empty_backup(self, tmp_path):
+        import json
+        path = tmp_path / "empty.json"
+        with open(path, "w") as f:
+            json.dump({"ids": [], "documents": [], "metadatas": [], "embeddings": []}, f)
+        buf = StringIO()
+        with patch('sys.stdout', buf):
+            mm.cmd_restore(fake_args(restore=str(path)))
+        assert "no memories" in buf.getvalue().lower()
+
+    def test_restore_ollama_unreachable_reembed(self, tmp_path):
+        path = self._make_backup_json(tmp_path)
+        buf = StringIO()
+        with patch.object(mm, '_check_ollama', return_value=False), \
+             patch('sys.stdout', buf):
+            mm.cmd_restore(fake_args(restore=path))
+        assert "unreachable" in buf.getvalue().lower() or "cannot re-embed" in buf.getvalue().lower()
+
+    def test_restore_ollama_unreachable_fast(self, tmp_path):
+        path = self._make_backup_json(tmp_path)
+        mock_col = MagicMock()
+        buf = StringIO()
+        with patch.object(mm, '_check_ollama', return_value=False), \
+             patch.object(mm, '_get_collection', return_value=mock_col), \
+             patch('builtins.input', return_value='yes'), \
+             patch('sys.stdout', buf):
+            mm.cmd_restore(fake_args(restore=path, fast=True))
+        assert "Warning" in buf.getvalue() or "warning" in buf.getvalue().lower()
+
+    def test_restore_fast_with_missing_embeddings(self, tmp_path):
+        path = self._make_backup_json(tmp_path, embeddings=[None])
+        buf = StringIO()
+        with patch.object(mm, '_check_ollama', return_value=False), \
+             patch.object(mm, '_get_collection', return_value=MagicMock()), \
+             patch('sys.stdout', buf):
+            mm.cmd_restore(fake_args(restore=path, fast=True))
+        assert "missing embeddings" in buf.getvalue().lower() or "Cannot use --fast" in buf.getvalue()
+
+    def test_restore_drop_happy_path(self, tmp_path):
+        path = self._make_backup_json(tmp_path, ids=["m1"], documents=["backup memory"], metadatas=[{"category": "fact"}], embeddings=[[0.1] * 768])
+        mock_col = MagicMock()
+        mock_col.get.return_value = {"ids": ["m1", "m_extra"], "metadatas": [{}, {}]}
+        mock_db = MagicMock()
+        buf = StringIO()
+        with patch.object(mm, '_check_ollama', return_value=True), \
+             patch.object(bong_memory_helpers, '_vector_db', mock_db), \
+             patch.object(mm, '_get_collection', return_value=mock_col), \
+             patch('builtins.input', return_value='yes'), \
+             patch('sys.stdout', buf):
+            mm.cmd_restore(fake_args(restore=path, drop=True))
+        all_deleted = []
+        for call in mock_col.delete.call_args_list:
+            all_deleted.extend(call[1]["ids"])
+        assert "m1" in all_deleted
+        assert "m_extra" in all_deleted
+
+    def test_restore_reembed_overwrites_existing(self, tmp_path):
+        path = self._make_backup_json(tmp_path, ids=["m1"], documents=["updated memory"], metadatas=[{"category": "fact"}], embeddings=[[0.1] * 768])
+        mock_col = MagicMock()
+        mock_col.get.return_value = {"ids": ["m1", "m_other"], "metadatas": [{}, {}]}
+        mock_db = MagicMock()
+        buf = StringIO()
+        with patch.object(mm, '_check_ollama', return_value=True), \
+             patch.object(bong_memory_helpers, '_vector_db', mock_db), \
+             patch.object(mm, '_get_collection', return_value=mock_col), \
+             patch('builtins.input', return_value='yes'), \
+             patch('sys.stdout', buf):
+            mm.cmd_restore(fake_args(restore=path))
+        all_deleted = []
+        for call in mock_col.delete.call_args_list:
+            all_deleted.extend(call[1]["ids"])
+        assert "m1" in all_deleted
+        assert "m_other" not in all_deleted
+        mock_db.add_texts.assert_called()
+        assert "overwrite" in buf.getvalue().lower() or len(mock_col.delete.call_args_list) >= 1
+
+    def test_restore_drop_reembed_with_overlapping_ids(self, tmp_path):
+        path = self._make_backup_json(tmp_path, ids=["m1", "m2"], documents=["backup1", "backup2"], metadatas=[{"category": "fact"}, {"category": "fact"}], embeddings=[[0.1] * 768, [0.2] * 768])
+        mock_col = MagicMock()
+        mock_col.get.return_value = {"ids": ["m1", "m_old"], "metadatas": [{}, {}]}
+        mock_db = MagicMock()
+        buf = StringIO()
+        with patch.object(mm, '_check_ollama', return_value=True), \
+             patch.object(bong_memory_helpers, '_vector_db', mock_db), \
+             patch.object(mm, '_get_collection', return_value=mock_col), \
+             patch('builtins.input', return_value='yes'), \
+             patch('sys.stdout', buf):
+            mm.cmd_restore(fake_args(restore=path, drop=True))
+        all_deleted = []
+        for call in mock_col.delete.call_args_list:
+            all_deleted.extend(call[1]["ids"])
+        assert "m1" in all_deleted
+        assert "m_old" in all_deleted
+        assert mock_db.add_texts.call_count == 2
+
+    def test_restore_drop_insert_fails_no_delete(self, tmp_path):
+        path = self._make_backup_json(tmp_path, ids=["m1"], documents=["backup memory"], metadatas=[{"category": "fact"}], embeddings=[[0.1] * 768])
+        mock_col = MagicMock()
+        mock_col.get.return_value = {"ids": ["m_old"], "metadatas": [{}]}
+        mock_db = MagicMock()
+        mock_db.add_texts.side_effect = Exception("embedding failed")
+        buf = StringIO()
+        with patch.object(mm, '_check_ollama', return_value=True), \
+             patch.object(bong_memory_helpers, '_vector_db', mock_db), \
+             patch.object(mm, '_get_collection', return_value=mock_col), \
+             patch('builtins.input', return_value='yes'), \
+             patch('sys.stdout', buf):
+            mm.cmd_restore(fake_args(restore=path, drop=True))
+        mock_col.delete.assert_not_called()
+        assert "incomplete" in buf.getvalue().lower() or "failed" in buf.getvalue().lower()
+
+    def test_restore_reembed_partial_failure(self, tmp_path):
+        path = self._make_backup_json(tmp_path, ids=["m1", "m2"], documents=["ok", "bad"], metadatas=[{"category": "fact"}, {"category": "fact"}], embeddings=[[0.1] * 768, [0.2] * 768])
+        mock_db = MagicMock()
+        call_count = [0]
+
+        def add_texts_side_effect(texts, metadatas=None, ids=None):
+            call_count[0] += 1
+            if call_count[0] == 2:
+                raise Exception("embedding failed for m2")
+            return ["m1"]
+
+        mock_db.add_texts.side_effect = add_texts_side_effect
+        buf = StringIO()
+        with patch.object(mm, '_check_ollama', return_value=True), \
+             patch.object(bong_memory_helpers, '_vector_db', mock_db), \
+             patch.object(mm, '_get_collection', return_value=MagicMock()), \
+             patch('builtins.input', return_value='yes'), \
+             patch('sys.stdout', buf):
+            mm.cmd_restore(fake_args(restore=path))
+        output = buf.getvalue()
+        assert "1/2" in output or "Restored 1" in output
+
+    def test_restore_old_schema_still_works(self, tmp_path):
+        import json
+        path = tmp_path / "old_schema.json"
+        data = {
+            "ids": ["m1"],
+            "documents": ["old memory"],
+            "metadatas": [{"username": "Eve", "category": "fact", "importance": 3}],
+            "embeddings": [[0.1] * 768],
+            "backup_time": NOW,
+            "memory_count": 1,
+            "model": "nomic-embed-text",
+        }
+        with open(path, "w") as f:
+            json.dump(data, f)
+        mock_col = MagicMock()
+        buf = StringIO()
+        with patch.object(mm, '_check_ollama', return_value=False), \
+             patch.object(mm, '_get_collection', return_value=mock_col), \
+             patch('builtins.input', return_value='yes'), \
+             patch('sys.stdout', buf):
+            mm.cmd_restore(fake_args(restore=str(path), fast=True))
+        mock_col.add.assert_called_once()
+
+    def test_restore_non_json_file(self, tmp_path):
+        bad_file = tmp_path / "binary.bin"
+        bad_file.write_bytes(b"\x00\x01\x02\x03")
+        buf = StringIO()
+        with patch('sys.stdout', buf):
+            mm.cmd_restore(fake_args(restore=str(bad_file)))
+        assert "failed" in buf.getvalue().lower() or "error" in buf.getvalue().lower()
+
+
+# ========== _auto_backup ==========
+
+class TestAutoBackup:
+    def test_auto_backup_called_before_delete(self):
+        items = [("m1", "memory", {"user_id": 111, "user_name": "Eve", "category": "fact", "importance": 3})]
+        mock_col = MagicMock()
+        with patch.object(mm, '_get_all_memories', return_value=items), \
+             patch.object(mm, '_get_collection', return_value=mock_col), \
+             patch.object(mm, '_auto_backup', return_value="/tmp/backup.json") as mock_ab, \
+             patch('builtins.input', return_value='yes'), \
+             patch('builtins.print'):
+            mm.cmd_delete(fake_args(delete="1"))
+        mock_ab.assert_called_once()
+
+    def test_auto_backup_failure_doesnt_block(self):
+        items = [("m1", "memory", {"user_id": 111, "user_name": "Eve", "category": "fact", "importance": 3})]
+        mock_col = MagicMock()
+        buf = StringIO()
+        with patch.object(mm, '_get_all_memories', return_value=items), \
+             patch.object(mm, '_get_collection', return_value=mock_col), \
+             patch.object(mm, 'cmd_backup', side_effect=OSError("disk full")), \
+             patch('builtins.input', return_value='yes'), \
+             patch('sys.stdout', buf):
+            mm.cmd_delete(fake_args(delete="1"))
+        mock_col.delete.assert_called_once()
+        assert "Warning" in buf.getvalue() or "warning" in buf.getvalue().lower()
+
+    def test_auto_backup_not_called_on_dry_run(self):
+        items = [("m1", "memory", {"user_id": 111, "user_name": "Eve", "category": "fact", "importance": 3})]
+        mock_col = MagicMock()
+        with patch.object(mm, '_get_all_memories', return_value=items), \
+             patch.object(mm, '_get_collection', return_value=mock_col), \
+             patch.object(mm, '_auto_backup', return_value=None) as mock_ab, \
+             patch('builtins.input', return_value='yes'), \
+             patch('builtins.print'), \
+             patch('sys.stdout', StringIO()):
+            mm.cmd_delete(fake_args(delete="1", dry_run=True))
+        mock_ab.assert_not_called()
+
+    def test_auto_backup_on_edit_text_change(self):
+        meta = {"user_id": 111, "user_name": "Eve", "category": "fact", "importance": 3, "saved_at": NOW, "last_accessed": NOW, "access_count": 0}
+        items = [("m1", "old text", meta)]
+        mock_col = MagicMock()
+        inputs = ["1", "new text", "5", "y"]
+        buf = StringIO()
+        with patch.object(mm, '_get_all_memories', return_value=items), \
+             patch.object(mm, '_get_collection', return_value=mock_col), \
+             patch.object(mm, '_auto_backup', return_value=None) as mock_ab, \
+             patch.object(bong_memory_helpers, '_clean_for_embedding', side_effect=lambda x: x), \
+             patch.object(bong_memory_helpers, '_vector_db', MagicMock()), \
+             patch('builtins.input', side_effect=inputs), \
+             patch('sys.stdout', buf):
+            mm.cmd_edit(fake_args(edit="1"))
+        mock_ab.assert_called_once()
+
+
+# ========== _check_ollama ==========
+
+class TestCheckOllama:
+    def test_ollama_reachable(self):
+        with patch('urllib.request.urlopen') as mock_urlopen:
+            mock_resp = MagicMock()
+            mock_resp.status = 200
+            mock_resp.__enter__ = lambda s: s
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            mock_urlopen.return_value = mock_resp
+            assert mm._check_ollama() is True
+
+    def test_ollama_unreachable(self):
+        import urllib.error
+        with patch('urllib.request.urlopen', side_effect=urllib.error.URLError("no connection")):
+            assert mm._check_ollama() is False
+
+    def test_ollama_uses_env_host(self):
+        with patch.dict('os.environ', {"OLLAMA_HOST": "192.168.1.100:11434"}), \
+             patch('urllib.request.urlopen') as mock_urlopen:
+            mock_resp = MagicMock()
+            mock_resp.status = 200
+            mock_resp.__enter__ = lambda s: s
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            mock_urlopen.return_value = mock_resp
+            mm._check_ollama()
+            call_url = mock_urlopen.call_args[0][0].full_url
+            assert "192.168.1.100" in call_url

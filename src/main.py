@@ -144,6 +144,9 @@ def main():
         import bong_memory_helpers
         import dm_approval
         import reminders
+
+        await bot.user.edit(username="Bong")
+
         bong_memory_helpers._expire_old_memories()
         bong_song_stats.load_song_stats()
         dm_approval.load_pending_approvals()
