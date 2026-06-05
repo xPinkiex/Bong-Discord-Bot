@@ -296,8 +296,7 @@ def loop_audio(enabled: bool) -> str:
         if bong_tools.loop_track:
             return f"Looping '{Path(bong_tools.loop_track).stem}'."
         return "Looping the current song (will bind when playback starts)."
-    bong_tools.loop_enabled = False
-    return "Nothing is playing. Play a song first before enabling loop."
+    return "Loop enabled. It will activate when the next song starts playing."
 
 
 @tool
