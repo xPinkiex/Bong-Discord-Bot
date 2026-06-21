@@ -7,10 +7,15 @@
 #   4. Strips wake word and forwards command through the LLM tool loop
 #
 # DAVE encryption is handled at multiple levels:
-#   - venv patches to reader.py: dave_strip_success, parse_fail, passthrough
-#   - venv patch to opus.py: FEC decode skips DAVE-encrypted next packets
-#   - Sink-level: drops frames with _voice_recv_needs_dave_inner_decrypt
-#   - Peak detection: drops frames with |sample| > 15000 (garbage detection)
+#   - voice_recv fork: dave.py parses DAVE trailer, reader.py inner-decrypt pipeline
+#   - voice_recv fork: passthrough detection strips DAVE trailer for plaintext audio
+#   - voice_recv fork: opus.py FEC decode skips DAVE-encrypted next packets
+#   - Sink-level: skips frames with _voice_recv_needs_dave_inner_decrypt
+#   - Sink-level: lets through frames with _voice_recv_dave_inner_decrypted
+#     or _voice_recv_dave_inner_deferred_recovered (clean audio)
+#   - Peak detection: drops frames with |sample| > PEAK_THRESHOLD (garbage detection)
+#   - Ratio detection: drops DAVE-decrypted frames with peak/RMS < DAVE_RATIO_THRESHOLD
+#     (wrong-key ChaCha20 gives near-uniform distribution, ratio ~1.4; speech is 2+)
 #
 # Models (Whisper, openWakeWord) are loaded when voice commands start
 # and unloaded when voice commands stop, to minimize RAM usage.
@@ -39,6 +44,9 @@ import user_data
 _LOG_FILE = BONG_DATA / "logs" / "voice_commands.log"
 _DEBUG_WAV_DIR = BONG_DATA / "logs" / "voice_debug"
 _MAX_DEBUG_WAVS = 10
+
+def _rms(arr: np.ndarray) -> int:
+    return int(np.sqrt(np.mean(arr.astype(np.float32) ** 2)))
 
 _model_lock = Lock()
 
@@ -138,7 +146,6 @@ class OwwUserState:
         from functools import partial
         from collections import deque
         self.prediction_buffer: dict[str, deque] = defaultdict(partial(deque, maxlen=30))
-        self.vad_prediction_buffer: list = []
         self.last_audio_time = time.time()
         self.preprocessor = _SharedAudioFeatures(
             shared_oww_model.preprocessor.melspec_model,
@@ -149,7 +156,7 @@ class OwwUserState:
         self._model_input_name = shared_oww_model.model_input_names[self._model_name]
         self._class_mapping = shared_oww_model.class_mapping.get(self._model_name, {})
 
-    def predict(self, audio_chunk: np.ndarray, vad_threshold: float = 0.5) -> dict:
+    def predict(self, audio_chunk: np.ndarray) -> dict:
         self.last_audio_time = time.time()
         self.preprocessor(audio_chunk)
         onnx_session = self.shared_model.models[self._model_name]
@@ -184,25 +191,13 @@ class OwwUserState:
             if len(self.prediction_buffer[cls]) < 5:
                 predictions[cls] = 0.0
             self.prediction_buffer[cls].append(predictions[cls])
-        if vad_threshold > 0 and hasattr(self.shared_model, 'vad') and self.shared_model.vad is not None:
-            self.shared_model.vad(audio_chunk)
-            self.vad_prediction_buffer = list(self.shared_model.vad.prediction_buffer)
-            vad_frames = list(self.vad_prediction_buffer)[-7:-4]
-            vad_max_score = np.max(vad_frames) if len(vad_frames) > 0 else 0
-            for mdl in predictions.keys():
-                if vad_max_score < vad_threshold:
-                    predictions[mdl] = 0.0
         return predictions
 
     def reset(self):
         from functools import partial
         from collections import deque
         self.prediction_buffer = defaultdict(partial(deque, maxlen=30))
-        self.vad_prediction_buffer = []
-        self.preprocessor = _SharedAudioFeatures(
-            self.shared_model.preprocessor.melspec_model,
-            self.shared_model.preprocessor.embedding_model,
-        )
+        self.preprocessor.accumulated_samples = 0
 
 
 def _predict_for_user(user_id: int, audio_chunk: np.ndarray) -> dict:
@@ -212,8 +207,7 @@ def _predict_for_user(user_id: int, audio_chunk: np.ndarray) -> dict:
     if user_id not in _oww_user_states:
         _oww_user_states[user_id] = OwwUserState(user_id, _oww_shared_model)
     state = _oww_user_states[user_id]
-    vad_threshold = getattr(_oww_shared_model, 'vad_threshold', 0.5)
-    return state.predict(audio_chunk, vad_threshold=vad_threshold if vad_threshold > 0 else 0)
+    return state.predict(audio_chunk)
 
 
 def _reset_oww_for_user(user_id: int):
@@ -261,7 +255,7 @@ def _load_models():
             custom_model = BONG_DATA / "wakeword_models" / "hey_bong.onnx"
             if custom_model.exists():
                 _vlog(f"Loading custom openWakeWord model ({custom_model})...")
-                _oww_shared_model = Model(wakeword_model_paths=[str(custom_model)], vad_threshold=0.5)
+                _oww_shared_model = Model(wakeword_model_paths=[str(custom_model)], vad_threshold=0)
             else:
                 import openwakeword
                 oww_file = openwakeword.__file__
@@ -270,7 +264,7 @@ def _load_models():
                 model_dir = Path(oww_file).parent / "resources" / "models"
                 model_path = model_dir / "hey_jarvis_v0.1.onnx"
                 _vlog("Loading fallback openWakeWord model...")
-                _oww_shared_model = Model(wakeword_model_paths=[str(model_path)], vad_threshold=0.5)
+                _oww_shared_model = Model(wakeword_model_paths=[str(model_path)], vad_threshold=0)
             _oww_user_states.clear()
             _vlog("openWakeWord shared model loaded")
 
@@ -355,7 +349,9 @@ SILENCE_DURATION = 0.8   # Seconds of silence to mark end of utterance
 MIN_UTTERANCE_DURATION = 0.5  # Minimum seconds to consider an utterance
 MAX_UTTERANCE_DURATION = 30.0  # Maximum seconds before forcing transcription
 
-PEAK_THRESHOLD = 12000    # DAVE stale-key garbage peaks above this; real speech rarely exceeds it
+PEAK_THRESHOLD = 12000    # DAVE stale-key garbage peaks above this; loud speech rarely exceeds it
+DAVE_RATIO_GUARD_PEAK = 2000   # Minimum peak for ratio guard (below this, speech can have ratio < 2)
+DAVE_RATIO_THRESHOLD = 2.0     # Wrong-key ChaCha20 output has peak/RMS ~1.4; real speech is 2+
 
 WAKE_WORD = "hey bong"
 # openWakeWord processes 80ms frames at 16kHz mono = 1280 samples
@@ -411,17 +407,32 @@ class BongVoiceSink(AudioSink):
         if isinstance(data.packet, SilencePacket):
             return
 
-        # DAVE-corrupted frames (flagged by venv patches) — skip entirely
+        # DAVE handling: check extension_data flags from voice_recv decrypt pipeline
         ext = getattr(data.packet, 'extension_data', None)
-        if isinstance(ext, dict) and ext.get('_voice_recv_needs_dave_inner_decrypt'):
-            return
+        if isinstance(ext, dict):
+            if ext.get('_voice_recv_dave_inner_decrypted') or ext.get('_voice_recv_dave_inner_deferred_recovered'):
+                pass
+            elif ext.get('_voice_recv_needs_dave_inner_decrypt'):
+                return
 
         # Garbage detection: DAVE epoch transitions can produce frames where
         # inner decrypt "succeeded" with stale keys. Opus decodes these into
         # noise with extreme peak values. Real speech peaks rarely exceed PEAK_THRESHOLD.
         try:
             audio_array = np.frombuffer(pcm_data, dtype=np.int16)
-            if np.abs(audio_array).max() > PEAK_THRESHOLD:
+            peak = np.abs(audio_array).max()
+            rms_val = _rms(audio_array)
+            if peak > PEAK_THRESHOLD:
+                return
+            # DAVE-decrypted frames get a ratio check: wrong-key ChaCha20/AES-GCM
+            # produces near-uniform int16 distribution with peak/RMS ~1.4
+            # (sqrt(3) for uniform dist), while real speech has ratio 2-10+.
+            # Only applies when peak > DAVE_RATIO_GUARD_PEAK because quiet speech
+            # (sustained vowels) can also have low ratios.
+            is_dave_decrypted = isinstance(ext, dict) and (
+                ext.get('_voice_recv_dave_inner_decrypted') or ext.get('_voice_recv_dave_inner_deferred_recovered')
+            )
+            if is_dave_decrypted and peak > DAVE_RATIO_GUARD_PEAK and rms_val > 0 and peak / rms_val < DAVE_RATIO_THRESHOLD:
                 return
         except Exception:
             return

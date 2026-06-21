@@ -8,16 +8,17 @@
 #   5. Dispatches async actions (voice, reactions, file sends) that the sync tools queued
 #   6. Records the exchange in channel history for future context
 
-import discord
 import asyncio
 import base64
-
+import os
 import re
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
+
+import discord
 import httpx
-import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -27,31 +28,44 @@ BONG_USER_DATA = PROJECT_ROOT / "bong_user_data"
 
 # discord.py's command framework — this file is loaded as a "cog" (plugin)
 from discord.ext import commands
+from langchain_core.messages import HumanMessage, ToolMessage
 
 # LangChain LLM wrappers for Ollama-hosted models
 from langchain_ollama.chat_models import ChatOllama
-from langchain_core.messages import HumanMessage, ToolMessage
 
-import bong_tools
-import bong_song_stats
+import bong_e621
 import bong_memory_helpers
+import bong_song_stats
+import bong_tools
 import debug
 import dm_approval
 import persist
 import reminders
 import user_data
 import voice_commands
-import bong_e621
+
+_CLASSIFIER_MODEL = os.getenv("CLASSIFIER_MODEL", "gemma3:12b-cloud")
+_CONVERSATION_MODEL = os.getenv("CONVERSATION_MODEL", "glm-5.2:cloud")
 
 # --- LLM Models ---
 # The classifier model is fast and cheap — it only needs to output YES/NO
-classifier_model = ChatOllama(model="gemma3:12b-cloud", temperature=0.1, num_predict=50, keep_alive=-1)
+classifier_model = ChatOllama(
+    model=_CLASSIFIER_MODEL, temperature=0.1, num_predict=50, keep_alive=-1
+)
 # The vision model describes images and generates filenames for saved images
-description_model = ChatOllama(model="gemma3:12b-cloud", temperature=0.3, num_predict=800, keep_alive=-1)
+description_model = ChatOllama(
+    model=_CLASSIFIER_MODEL, temperature=0.3, num_predict=800, keep_alive=-1
+)
 
 # The main conversation model — used for generating Bong's responses
 # base_model is without tools (used for retrying empty responses)
-base_model = ChatOllama(model="glm-5.1:cloud", temperature=0.5, num_predict=2000, repeat_penalty=1.6, keep_alive=-1)
+base_model = ChatOllama(
+    model=_CONVERSATION_MODEL,
+    temperature=0.5,
+    num_predict=2000,
+    repeat_penalty=1.6,
+    keep_alive=-1,
+)
 # model has tools bound — used for retrying after voice errors
 model = base_model.bind_tools(bong_tools.tools)
 
@@ -83,20 +97,49 @@ _summarization_in_progress: set[int] = set()
 # - e621:     e621 search, subscribe, unsubscribe, DM notifications
 
 # Channels whose history is automatically loaded on startup so Bong has context immediately
-DEBUG_CHANNEL_IDS = [ 698924302594211883, 698633099591942199 ]
+DEBUG_CHANNEL_IDS = [698924302594211883, 698633099591942199]
 
 # Load the system prompt and classifier prompt from template files
 TEMPLATE_DIR = BONG_DATA / "Response Templates"
 prompt_template = (TEMPLATE_DIR / "Bong.txt").read_text(encoding="utf-8")
-classifier_template = (TEMPLATE_DIR / "Spoken_To_Classifier.txt").read_text(encoding="utf-8")
+classifier_template = (TEMPLATE_DIR / "Spoken_To_Classifier.txt").read_text(
+    encoding="utf-8"
+)
 
 # Recognized file extensions for categorizing attachments
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
 VIDEO_EXTS = (".mp4", ".mov", ".avi", ".webm", ".mkv")
-TEXT_EXTS = (".txt", ".md", ".py", ".json", ".csv", ".xml", ".yaml", ".yml", ".cfg", ".ini", ".log", ".toml", ".rs", ".js", ".ts", ".html", ".css", ".sh", ".bat")
+TEXT_EXTS = (
+    ".txt",
+    ".md",
+    ".py",
+    ".json",
+    ".csv",
+    ".xml",
+    ".yaml",
+    ".yml",
+    ".cfg",
+    ".ini",
+    ".log",
+    ".toml",
+    ".rs",
+    ".js",
+    ".ts",
+    ".html",
+    ".css",
+    ".sh",
+    ".bat",
+)
 
 # Tool names that need the music/image/text library injected as context when called
-MUSIC_TOOLS = {"list_music", "download_music", "play_audio", "skip_audio", "loop_audio", "music_shuffle_enabled"}
+MUSIC_TOOLS = {
+    "list_music",
+    "download_music",
+    "play_audio",
+    "skip_audio",
+    "loop_audio",
+    "music_shuffle_enabled",
+}
 IMAGE_TOOLS = {"list_images", "send_image"}
 TEXT_TOOLS = {"list_texts", "send_text"}
 
@@ -108,12 +151,18 @@ LLM_RETRY_DELAYS = [2, 4]  # seconds between retries
 
 
 # Exceptions that indicate a transient network/timeout issue worth retrying
-RETRYABLE_EXCEPTIONS = (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError, ConnectionError, OSError)
+RETRYABLE_EXCEPTIONS = (
+    httpx.TimeoutException,
+    httpx.ConnectError,
+    httpx.NetworkError,
+    ConnectionError,
+    OSError,
+)
 
 
 async def invoke_with_retry(model, messages, max_retries=LLM_MAX_RETRIES):
     """Invoke an LLM model with automatic retries on transient errors.
-    
+
     Retries up to max_retries times with exponential backoff.
     Only retries on network/timeout errors, not on model errors or bad output.
     """
@@ -123,38 +172,65 @@ async def invoke_with_retry(model, messages, max_retries=LLM_MAX_RETRIES):
         except RETRYABLE_EXCEPTIONS as e:
             if attempt >= max_retries:
                 raise
-            delay = LLM_RETRY_DELAYS[attempt] if attempt < len(LLM_RETRY_DELAYS) else LLM_RETRY_DELAYS[-1]
-            debug.error("AI", f"LLM timeout/connection error (attempt {attempt + 1}/{max_retries + 1}), retrying in {delay}s: {e}")
+            delay = (
+                LLM_RETRY_DELAYS[attempt]
+                if attempt < len(LLM_RETRY_DELAYS)
+                else LLM_RETRY_DELAYS[-1]
+            )
+            debug.error(
+                "AI",
+                f"LLM timeout/connection error (attempt {attempt + 1}/{max_retries + 1}), retrying in {delay}s: {e}",
+            )
             await asyncio.sleep(delay)
         except Exception:
             raise
 
 
-async def is_talking_to_bong(message_content: str, recent_messages: list, reply_context: str = "", bot_display_name: str = "Bong") -> bool:
+async def is_talking_to_bong(
+    message_content: str,
+    recent_messages: list,
+    reply_context: str = "",
+    bot_display_name: str = "Bong",
+) -> bool:
     """Check if the user is talking to Bong.
-    
+
     Fast path: if the message contains "bong" or a bot mention, return True immediately.
     Slow path: run the classifier LLM to decide for ambiguous messages.
     """
     # Fast path: obvious mentions of the bot
-    if "bong" in message_content.lower() or f"<@{bong_tools.BOT_USER_ID}>" in message_content:
+    if (
+        "bong" in message_content.lower()
+        or f"<@{bong_tools.BOT_USER_ID}>" in message_content
+    ):
         return True
 
     # Slow path: ask the classifier model
     tagged_name = f"{bot_display_name} (Bong)"
-    recent_context = "\n".join(
-        msg.replace(bot_display_name, tagged_name) if bot_display_name in msg else msg
-        for msg in recent_messages[-7:]
-    ) if recent_messages else "No recent messages"
+    recent_context = (
+        "\n".join(
+            msg.replace(bot_display_name, tagged_name)
+            if bot_display_name in msg
+            else msg
+            for msg in recent_messages[-7:]
+        )
+        if recent_messages
+        else "No recent messages"
+    )
 
     actual_reply_context = reply_context if reply_context else "None"
 
     # Fill in the classifier prompt template with recent context and the current message
-    prompt = classifier_template.replace("{recent_context}", recent_context).replace("{message_content}", message_content).replace("{reply_context}", actual_reply_context)
+    prompt = (
+        classifier_template.replace("{recent_context}", recent_context)
+        .replace("{message_content}", message_content)
+        .replace("{reply_context}", actual_reply_context)
+    )
 
     try:
         # Run the classifier in a thread to avoid blocking the async event loop
-        response = await invoke_with_retry(classifier_model, [HumanMessage(content=prompt)])
+        response = await invoke_with_retry(
+            classifier_model, [HumanMessage(content=prompt)]
+        )
         response_text = _extract_response_text(response).upper()
         return "YES" in response_text
     except Exception:
@@ -163,7 +239,7 @@ async def is_talking_to_bong(message_content: str, recent_messages: list, reply_
 
 async def process_attachments(message):
     """Categorize and read message attachments.
-    
+
     Scans all attachments for images, videos, and text files. Images are base64-encoded
     for the vision model. Text files are read into strings. Returns a description string
     plus the raw data needed by describe_image and read_text_file tools.
@@ -174,33 +250,47 @@ async def process_attachments(message):
 
     for a in message.attachments:
         # Check content type first (reliable), then fall back to file extension
-        is_image = (a.content_type and a.content_type.startswith("image/")) or (a.filename and any(a.filename.lower().endswith(ext) for ext in IMAGE_EXTS))
-        is_video = (a.content_type and a.content_type.startswith("video/")) or (a.filename and any(a.filename.lower().endswith(ext) for ext in VIDEO_EXTS))
-        is_text = (a.content_type and a.content_type.startswith("text/")) or (a.filename and any(a.filename.lower().endswith(ext) for ext in TEXT_EXTS))
+        is_image = (a.content_type and a.content_type.startswith("image/")) or (
+            a.filename and any(a.filename.lower().endswith(ext) for ext in IMAGE_EXTS)
+        )
+        is_video = (a.content_type and a.content_type.startswith("video/")) or (
+            a.filename and any(a.filename.lower().endswith(ext) for ext in VIDEO_EXTS)
+        )
+        is_text = (a.content_type and a.content_type.startswith("text/")) or (
+            a.filename and any(a.filename.lower().endswith(ext) for ext in TEXT_EXTS)
+        )
 
         if is_image:
             size_info = f" ({a.width}x{a.height})" if a.width and a.height else ""
-            attachment_parts.append(f"[Image {len(image_attachments)}: {a.filename}{size_info}]")
+            attachment_parts.append(
+                f"[Image {len(image_attachments)}: {a.filename}{size_info}]"
+            )
             try:
                 img_bytes = await a.read()
-                image_attachments.append({
-                    "filename": a.filename,
-                    "content_type": a.content_type or "image/png",
-                    "base64": base64.b64encode(img_bytes).decode("utf-8"),
-                })
+                image_attachments.append(
+                    {
+                        "filename": a.filename,
+                        "content_type": a.content_type or "image/png",
+                        "base64": base64.b64encode(img_bytes).decode("utf-8"),
+                    }
+                )
             except Exception as e:
                 debug.log("AI", f"Failed to read image {a.filename}: {e}")
         elif is_video:
             attachment_parts.append(f"[Video: {a.filename}]")
         elif is_text:
-            attachment_parts.append(f"[Text file {len(text_attachments)}: {a.filename}]")
+            attachment_parts.append(
+                f"[Text file {len(text_attachments)}: {a.filename}]"
+            )
             try:
                 text_bytes = await a.read()
                 text_content = text_bytes.decode("utf-8", errors="replace")
-                text_attachments.append({
-                    "filename": a.filename,
-                    "content": text_content,
-                })
+                text_attachments.append(
+                    {
+                        "filename": a.filename,
+                        "content": text_content,
+                    }
+                )
             except Exception as e:
                 debug.log("AI", f"Failed to read text file {a.filename}: {e}")
 
@@ -210,7 +300,7 @@ async def process_attachments(message):
 
 def build_voice_status(guild):
     """Build the voice status string describing Bong's current voice channel state.
-    
+
     Returns (vc, voice_status) where vc is the voice client object (or None)
     and voice_status is a human-readable string for the system prompt.
     """
@@ -219,7 +309,9 @@ def build_voice_status(guild):
         if vc and vc.is_connected():
             voice_status = f"Connected to voice channel '{vc.channel.name}'. Do NOT use join_voice — you are already in voice."
             if bong_tools.current_track and (vc.is_playing() or vc.is_paused()):
-                voice_status += f"\nCurrently playing '{Path(bong_tools.current_track).stem}'."
+                voice_status += (
+                    f"\nCurrently playing '{Path(bong_tools.current_track).stem}'."
+                )
             if voice_commands.is_listening(guild.id):
                 voice_status += "\nVoice command listener is ACTIVE — listening for 'hey bong' wake word."
         else:
@@ -230,9 +322,18 @@ def build_voice_status(guild):
     return vc, voice_status
 
 
-def build_system_prompt(message, history, voice_status, attachment_desc, image_attachments, text_attachments, replied, replied_to):
+def build_system_prompt(
+    message,
+    history,
+    voice_status,
+    attachment_desc,
+    image_attachments,
+    text_attachments,
+    replied,
+    replied_to,
+):
     """Fill in the prompt template with all context variables and return the complete system message.
-    
+
     This is the main prompt that the LLM receives. It injects:
       - User name and ID
       - Voice channel status
@@ -244,7 +345,9 @@ def build_system_prompt(message, history, voice_status, attachment_desc, image_a
     history_str = "\n".join(history)
     user_msg = message.content.replace("\n", ". ")
     # Retrieve relevant memories based on the user's message and display name
-    memories_str = bong_memory_helpers.retrieve_memories(f"{message.author.display_name}: {user_msg}", user_id=message.author.id)
+    memories_str = bong_memory_helpers.retrieve_memories(
+        f"{message.author.display_name}: {user_msg}", user_id=message.author.id
+    )
 
     # Build the reply context block if the user is replying to another message
     replied_content = replied_to.content.replace("\n", ". ") if replied else ""
@@ -255,7 +358,9 @@ def build_system_prompt(message, history, voice_status, attachment_desc, image_a
     # Build the attachment description block with instructions for the LLM
     attachment_block = ""
     if attachment_desc != "None":
-        attachment_block = f"\nAttachments included with this message: {attachment_desc}\n"
+        attachment_block = (
+            f"\nAttachments included with this message: {attachment_desc}\n"
+        )
     if image_attachments:
         attachment_block += "\nYou have image attachments on this message. ALWAYS call describe_image to look at them before responding. Never ignore an image.\n"
     if text_attachments:
@@ -264,20 +369,37 @@ def build_system_prompt(message, history, voice_status, attachment_desc, image_a
     # Build the summaries block from per-channel summaries
     summaries = channel_summaries.get(message.channel.id, [])
     if summaries:
-        summaries_str = "\n\nThe older conversation above has been summarized for context. These are compressed versions of what was discussed before the chat history you can see:\n" + "\n".join(f"- {s}" for s in summaries)
+        summaries_str = (
+            "\n\nThe older conversation above has been summarized for context. These are compressed versions of what was discussed before the chat history you can see:\n"
+            + "\n".join(f"- {s}" for s in summaries)
+        )
     else:
         summaries_str = ""
 
     # Replace all {placeholders} in the template with the actual values
-    return prompt_template.replace("{username}", message.author.display_name).replace("{userID}", str(message.author.id)).replace("{message}", user_msg).replace("{voice_status}", voice_status).replace("{attachments}", attachment_block).replace("{history}", history_str).replace("{reply_context}", reply_block).replace("{memories}", memories_str).replace("{summaries}", summaries_str)
+    return (
+        prompt_template.replace("{username}", message.author.display_name)
+        .replace("{userID}", str(message.author.id))
+        .replace("{message}", user_msg)
+        .replace("{voice_status}", voice_status)
+        .replace("{attachments}", attachment_block)
+        .replace("{history}", history_str)
+        .replace("{reply_context}", reply_block)
+        .replace("{memories}", memories_str)
+        .replace("{summaries}", summaries_str)
+    )
 
 
 async def update_voice_state(guild, author_id):
     """Update bong_tools.voice_connected and caller_in_voice based on the current guild state.
-    
+
     Tries the cache first (guild.get_member), then falls back to an API call (guild.fetch_member).
     """
-    bong_tools.voice_connected = (guild is not None and guild.voice_client is not None and guild.voice_client.is_connected())
+    bong_tools.voice_connected = (
+        guild is not None
+        and guild.voice_client is not None
+        and guild.voice_client.is_connected()
+    )
     if guild:
         # Try cache first to avoid unnecessary API calls
         member = guild.get_member(author_id)
@@ -286,71 +408,96 @@ async def update_voice_state(guild, author_id):
         else:
             # Fall back to API call if not in cache
             member = await guild.fetch_member(author_id)
-            bong_tools.caller_in_voice = bool(member and member.voice and member.voice.channel)
+            bong_tools.caller_in_voice = bool(
+                member and member.voice and member.voice.channel
+            )
     else:
         bong_tools.caller_in_voice = False
 
 
 def inject_library_context(messages, tool_calls):
     """If any tool calls reference music/image/text libraries, inject the current library listing into the message history.
-    
+
     This gives the LLM the index numbers it needs to select files by name.
     """
     names = {tc["name"] for tc in tool_calls}
     if names & MUSIC_TOOLS:
         bong_tools.refresh_music_library()
-        library_lines = "\n".join(f"{i}: {f.stem}" for i, f in enumerate(bong_tools.music_library))
+        library_lines = "\n".join(
+            f"{i}: {f.stem}" for i, f in enumerate(bong_tools.music_library)
+        )
         messages.append(HumanMessage(content=f"[Music Library]\n{library_lines}"))
     if names & IMAGE_TOOLS:
         bong_tools.refresh_image_library()
-        image_lines = "\n".join(f"{i}: {f.stem}" for i, f in enumerate(bong_tools.image_library))
+        image_lines = "\n".join(
+            f"{i}: {f.stem}" for i, f in enumerate(bong_tools.image_library)
+        )
         messages.append(HumanMessage(content=f"[Image Library]\n{image_lines}"))
     if names & TEXT_TOOLS:
         bong_tools.refresh_text_library()
-        text_lines = "\n".join(f"{i}: {f.name}" for i, f in enumerate(bong_tools.text_library))
+        text_lines = "\n".join(
+            f"{i}: {f.name}" for i, f in enumerate(bong_tools.text_library)
+        )
         messages.append(HumanMessage(content=f"[Text File Library]\n{text_lines}"))
 
 
 async def _handle_describe_image(tool_args, image_attachments):
     """Execute the describe_image tool inline (needs async access to vision model and attachment data).
-    
+
     This can't go through bong_tools because it needs:
       1. The base64 image data from the message attachment
       2. Async invocation of the vision model
     The tool function in bong_tools just returns a placeholder string; the actual work happens here.
     """
     idx = tool_args.get("index", 0)
-    question = tool_args.get("question", "Briefly describe this image in 1-2 sentences. Be concise.")
+    question = tool_args.get(
+        "question", "Briefly describe this image in 1-2 sentences. Be concise."
+    )
     if not image_attachments:
         return "No image attachments found on this message."
     if idx < 0 or idx >= len(image_attachments):
-        return f"Image index {idx} out of range. There are {len(image_attachments)} image(s) attached (indexes 0-{len(image_attachments)-1})."
+        return f"Image index {idx} out of range. There are {len(image_attachments)} image(s) attached (indexes 0-{len(image_attachments) - 1})."
     img = image_attachments[idx]
     try:
         # First, generate a short label for the filename
-        label_msg = HumanMessage(content=[
-            {"type": "text", "text": "Describe this image in exactly 5 words as a short label suitable for a filename. Use only letters, numbers, and underscores instead of spaces. Examples: Dog_wearing_small_hat_meme, Orange_cat_sleeping_on_couch, Beautiful_sunset_over_the_ocean. Reply with ONLY the label, nothing else."},
-            {"type": "image_url", "image_url": f"data:{img['content_type']};base64,{img['base64']}"},
-        ])
+        label_msg = HumanMessage(
+            content=[
+                {
+                    "type": "text",
+                    "text": "Describe this image in exactly 5 words as a short label suitable for a filename. Use only letters, numbers, and underscores instead of spaces. Examples: Dog_wearing_small_hat_meme, Orange_cat_sleeping_on_couch, Beautiful_sunset_over_the_ocean. Reply with ONLY the label, nothing else.",
+                },
+                {
+                    "type": "image_url",
+                    "image_url": f"data:{img['content_type']};base64,{img['base64']}",
+                },
+            ]
+        )
         label_response = await invoke_with_retry(description_model, [label_msg])
         raw_label = _extract_response_text(label_response) or "image"
-        label = re.sub(r'[^\w]', '', raw_label.replace(" ", "_"))[:50] or "image"
+        label = re.sub(r"[^\w]", "", raw_label.replace(" ", "_"))[:50] or "image"
 
         # Save the image to saved_images/ with the generated label as filename
         save_dir = BONG_DATA / "saved_images"
         save_dir.mkdir(exist_ok=True)
-        ext = Path(img['filename']).suffix or ".png"
+        ext = Path(img["filename"]).suffix or ".png"
         save_path = save_dir / f"{label}{ext}"
         save_path.write_bytes(base64.b64decode(img["base64"]))
         debug.log("AI", f"Saved image to {save_path}")
 
         # Now generate the actual description of the image
-        vision_msg = HumanMessage(content=[
-            {"type": "text", "text": question},
-            {"type": "image_url", "image_url": f"data:{img['content_type']};base64,{img['base64']}"},
-        ])
+        vision_msg = HumanMessage(
+            content=[
+                {"type": "text", "text": question},
+                {
+                    "type": "image_url",
+                    "image_url": f"data:{img['content_type']};base64,{img['base64']}",
+                },
+            ]
+        )
         vision_response = await invoke_with_retry(description_model, [vision_msg])
-        vision_text = _extract_response_text(vision_response) or "Could not describe image"
+        vision_text = (
+            _extract_response_text(vision_response) or "Could not describe image"
+        )
         return f"Description of '{img['filename']}': {vision_text}"
     except Exception as e:
         debug.log("AI", f"Vision error for {img['filename']}: {e}")
@@ -359,28 +506,33 @@ async def _handle_describe_image(tool_args, image_attachments):
 
 async def _handle_read_text_file(tool_args, text_attachments):
     """Execute the read_text_file tool inline (needs access to text attachment contents).
-    
+
     Similar to describe_image — the actual data lives in the async cog context, not in the sync tool.
     """
     idx = tool_args.get("index", 0)
     if not text_attachments:
         return "No text file attachments found on this message."
     if idx < 0 or idx >= len(text_attachments):
-        return f"Text file index {idx} out of range. There are {len(text_attachments)} text file(s) attached (indexes 0-{len(text_attachments)-1})."
+        return f"Text file index {idx} out of range. There are {len(text_attachments)} text file(s) attached (indexes 0-{len(text_attachments) - 1})."
     txt = text_attachments[idx]
     try:
         # Save the text file to saved_texts/ for future reference
         save_dir = BONG_DATA / "saved_texts"
         save_dir.mkdir(exist_ok=True)
-        ext = Path(txt['filename']).suffix or ".txt"
-        clean_name = re.sub(r'[^\w]', '_', Path(txt['filename']).stem)[:50] or "text_file"
+        ext = Path(txt["filename"]).suffix or ".txt"
+        clean_name = (
+            re.sub(r"[^\w]", "_", Path(txt["filename"]).stem)[:50] or "text_file"
+        )
         save_path = save_dir / f"{clean_name}{ext}"
-        save_path.write_text(txt['content'], encoding="utf-8")
+        save_path.write_text(txt["content"], encoding="utf-8")
         debug.log("AI", f"Saved text file to {save_path}")
         # Return the content (truncated at 8000 chars to stay within LLM context limits)
-        content = txt['content']
+        content = txt["content"]
         if len(content) > 8000:
-            content = content[:8000] + f"\n\n... [truncated, {len(txt['content'])} total characters]"
+            content = (
+                content[:8000]
+                + f"\n\n... [truncated, {len(txt['content'])} total characters]"
+            )
         return f"Contents of '{txt['filename']}':\n{content}"
     except Exception as e:
         debug.log("AI", f"Text file error for {txt['filename']}: {e}")
@@ -389,7 +541,7 @@ async def _handle_read_text_file(tool_args, text_attachments):
 
 async def dispatch_tool(tool_name, tool_args, image_attachments, text_attachments):
     """Execute a single tool call, returning the string result.
-    
+
     describe_image and read_text_file are handled inline because they need
     async access to attachment data. Everything else goes through bong_tools.tool_map.
     """
@@ -407,7 +559,9 @@ async def dispatch_tool(tool_name, tool_args, image_attachments, text_attachment
         return f"Error: '{tool_name}' is not a valid tool name. You may have put the arguments inside the tool name by mistake. Call the tool again with just the tool name and the arguments as separate parameters. Available tools: {', '.join(bong_tools.tool_map.keys())}"
     try:
         # Run the sync tool function in a thread to avoid blocking the event loop
-        result = await asyncio.to_thread(bong_tools.tool_map[tool_name].invoke, tool_args)
+        result = await asyncio.to_thread(
+            bong_tools.tool_map[tool_name].invoke, tool_args
+        )
         debug.log("AI", f"Tool result: {result}")
         return result
     except Exception as e:
@@ -420,7 +574,7 @@ from llm_utils import _extract_response_text
 
 async def send_chunked(channel, text, max_len=2000):
     """Send text to a Discord channel, splitting into multiple messages if it exceeds max_len.
-    
+
     Splits at newlines when possible to avoid breaking mid-sentence.
     """
     if not text:
@@ -439,15 +593,17 @@ async def send_chunked(channel, text, max_len=2000):
         text = text[split_at:].lstrip("\n ")
 
 
-async def run_tool_loop(bound_model, messages, image_attachments, text_attachments, last_prompt_path):
+async def run_tool_loop(
+    bound_model, messages, image_attachments, text_attachments, last_prompt_path
+):
     """Run the LLM invocation + tool-call loop.
-    
+
     The loop works like this:
       1. Send the full conversation (system prompt + history) to the LLM
       2. If the LLM responds with tool calls, execute them and feed results back
       3. Repeat until the LLM gives a plain text response (or hit MAX_TOOL_ITERATIONS)
       4. Stream the final response token by token for faster perceived output
-    
+
     Returns (result_text, tool_summaries) where tool_summaries is a list of
     short descriptions like "web_search(query)" for inclusion in chat history.
     """
@@ -471,7 +627,11 @@ async def run_tool_loop(bound_model, messages, image_attachments, text_attachmen
         iteration += 1
         if iteration > MAX_TOOL_ITERATIONS:
             # Force the LLM to stop tool-calling and give a final response
-            messages.append(HumanMessage(content="You have exceeded the maximum number of tool calls. Please respond to the user now without making any more tool calls."))
+            messages.append(
+                HumanMessage(
+                    content="You have exceeded the maximum number of tool calls. Please respond to the user now without making any more tool calls."
+                )
+            )
             ai_response = await invoke_with_retry(bound_model, messages)
             _tally(ai_response)
             messages.append(ai_response)
@@ -487,21 +647,27 @@ async def run_tool_loop(bound_model, messages, image_attachments, text_attachmen
             debug.log_to_file("AI", f"TOOL CALL: {tool_name}({tool_args})")
             if last_prompt_path:
                 last_prompt_path.write_text(
-                    last_prompt_path.read_text(encoding="utf-8") + f"\nTOOL CALL: {tool_name}({tool_args})\n",
+                    last_prompt_path.read_text(encoding="utf-8")
+                    + f"\nTOOL CALL: {tool_name}({tool_args})\n",
                     encoding="utf-8",
                 )
 
-            tool_result = await dispatch_tool(tool_name, tool_args, image_attachments, text_attachments)
+            tool_result = await dispatch_tool(
+                tool_name, tool_args, image_attachments, text_attachments
+            )
             # Feed the tool result back to the LLM as a ToolMessage
-            messages.append(ToolMessage(content=str(tool_result), tool_call_id=tc["id"]))
+            messages.append(
+                ToolMessage(content=str(tool_result), tool_call_id=tc["id"])
+            )
 
             # Build a short summary for the chat history record
-            summary_args = ', '.join(str(v) for v in tool_args.values())
+            summary_args = ", ".join(str(v) for v in tool_args.values())
             tool_summaries.append(f"{tool_name}({summary_args})")
             debug.log_to_file("AI", f"TOOL RESULT ({tool_name}): {tool_result}")
             if last_prompt_path:
                 last_prompt_path.write_text(
-                    last_prompt_path.read_text(encoding="utf-8") + f"TOOL RESULT ({tool_name}): {tool_result}\n",
+                    last_prompt_path.read_text(encoding="utf-8")
+                    + f"TOOL RESULT ({tool_name}): {tool_result}\n",
                     encoding="utf-8",
                 )
 
@@ -520,14 +686,22 @@ async def run_tool_loop(bound_model, messages, image_attachments, text_attachmen
         _tally(retry_response)
         result_text = _extract_response_text(retry_response)
 
-    debug.log("Tokens", f"in={total_input} out={total_output} total={total_input + total_output}")
+    debug.log(
+        "Tokens",
+        f"in={total_input} out={total_output} total={total_input + total_output}",
+    )
     if bong_tools.current_user_id:
-        user_data.add_tokens(bong_tools.current_user_id, total_input + total_output, bong_tools.current_username or "")
+        user_data.add_tokens(
+            bong_tools.current_user_id,
+            total_input + total_output,
+            bong_tools.current_username or "",
+        )
 
     debug.log("AI", "Generating final response")
     if last_prompt_path:
         last_prompt_path.write_text(
-            last_prompt_path.read_text(encoding="utf-8") + f"\nFINAL RESPONSE:\n{result_text}\n",
+            last_prompt_path.read_text(encoding="utf-8")
+            + f"\nFINAL RESPONSE:\n{result_text}\n",
             encoding="utf-8",
         )
 
@@ -536,11 +710,12 @@ async def run_tool_loop(bound_model, messages, image_attachments, text_attachmen
 
 def _make_after_play_callback(guild, loop):
     """Create a closure that auto-continues playback after a track finishes.
-    
+
     This is attached to discord.py's FFmpegPCMAudio as the `after` callback.
     When a song ends naturally, this function checks the queue, then loop,
     then shuffle, and starts the next track automatically.
     """
+
     def after_play(err):
         if err:
             debug.log("Audio", f"Playback error: {err}")
@@ -552,18 +727,28 @@ def _make_after_play_callback(guild, loop):
                 return
         except Exception:
             return
-        if bong_tools.pending_play_audio or bong_tools.pending_skip or bong_tools.pending_stop:
+        if (
+            bong_tools.pending_play_audio
+            or bong_tools.pending_skip
+            or bong_tools.pending_stop
+        ):
             return
         try:
             next_track, _desc = bong_tools.advance_queue()
             if next_track:
                 bong_song_stats._increment_song(Path(next_track).stem)
-                vc.play(discord.FFmpegPCMAudio(next_track, options="-filter:a volume=0.3"), after=after_play)
-                asyncio.run_coroutine_threadsafe(_set_voice_status(guild, _build_now_playing_status()), loop)
+                vc.play(
+                    discord.FFmpegPCMAudio(next_track, options="-filter:a volume=0.3"),
+                    after=after_play,
+                )
+                asyncio.run_coroutine_threadsafe(
+                    _set_voice_status(guild, _build_now_playing_status()), loop
+                )
             else:
                 asyncio.run_coroutine_threadsafe(_set_voice_status(guild, None), loop)
         except Exception as e:
             debug.log("Audio", f"Auto-continue error: {e}")
+
     return after_play
 
 
@@ -571,6 +756,7 @@ def _make_after_play_callback(guild, loop):
 # These functions read the pending_* flags set by the sync tool functions
 # and perform the actual async Discord API calls. Each returns an error string
 # or None on success.
+
 
 async def _set_voice_status(guild, status: str | None):
     """Set or clear the voice channel status text. Silently ignores permission errors."""
@@ -600,6 +786,7 @@ def _build_now_playing_status():
         status += " 🔀"
     return status
 
+
 async def _dispatch_join_voice(guild):
     """Handle pending_join_voice flag. Connects to the target user's voice channel."""
     if not bong_tools.pending_join_voice:
@@ -612,10 +799,13 @@ async def _dispatch_join_voice(guild):
                 # If voice commands are active, use VoiceRecvClient to maintain receive capability
                 if voice_commands.is_listening(guild.id):
                     from discord.ext.voice_recv import VoiceRecvClient
+
                     await target_member.voice.channel.connect(cls=VoiceRecvClient)
                 else:
                     await target_member.voice.channel.connect()
-                debug.log("AI", f"Joined voice channel: {target_member.voice.channel.name}")
+                debug.log(
+                    "AI", f"Joined voice channel: {target_member.voice.channel.name}"
+                )
             except Exception as e:
                 debug.log("AI", f"Failed to join voice channel: {e}")
                 error = f"Failed to join voice channel: {e}"
@@ -635,6 +825,7 @@ async def _stop_playback(vc):
     listener, so we use stop_playing() instead when available.
     """
     from discord.ext.voice_recv import VoiceRecvClient
+
     if isinstance(vc, VoiceRecvClient):
         vc.stop_playing()
     else:
@@ -677,7 +868,11 @@ async def _dispatch_play_audio(guild):
         track_path = bong_tools.pending_play_audio
         bong_tools.current_track = track_path
         # Bind deferred loop track now that we have a current track
-        if bong_tools.loop_enabled and not bong_tools.loop_track and not bong_tools.queue_snapshot:
+        if (
+            bong_tools.loop_enabled
+            and not bong_tools.loop_track
+            and not bong_tools.queue_snapshot
+        ):
             bong_tools.loop_track = track_path
         after_play = _make_after_play_callback(guild, asyncio.get_running_loop())
         # If something is already playing, stop it first and wait briefly
@@ -697,8 +892,8 @@ async def _dispatch_play_audio(guild):
 
 async def _dispatch_loop_audio(guild):
     """Handle loop track start when nothing is currently playing.
-    
-    If audio is already playing, after_play will handle loop continuation — 
+
+    If audio is already playing, after_play will handle loop continuation —
     stopping and restarting here would cause the current song to replay from
     the beginning on every dispatch cycle.
     """
@@ -831,7 +1026,7 @@ async def _dispatch_stop_listening(guild):
 
 async def dispatch_voice_actions(guild, message, bot=None):
     """Dispatch all pending voice/audio/file-send actions in order.
-    
+
     Order matters: join before play, stop/skip before play, etc.
     Also sends any queued image or text files.
     Returns the first error encountered, or None on success.
@@ -863,7 +1058,11 @@ async def dispatch_voice_actions(guild, message, bot=None):
 
         # Update voice channel status after all dispatchers have run
         # (catches loop/shuffle toggles, play, stop, etc.)
-        if guild and guild.voice_client and (guild.voice_client.is_playing() or guild.voice_client.is_paused()):
+        if (
+            guild
+            and guild.voice_client
+            and (guild.voice_client.is_playing() or guild.voice_client.is_paused())
+        ):
             await _set_voice_status(guild, _build_now_playing_status())
 
         # Send any queued image files
@@ -927,7 +1126,9 @@ async def summarize_history_chunk(text: str) -> str:
         "Be concise and factual.\n\n"
         f"{text}"
     )
-    response = await invoke_with_retry(description_model, [HumanMessage(content=prompt)])
+    response = await invoke_with_retry(
+        description_model, [HumanMessage(content=prompt)]
+    )
     return _extract_response_text(response).strip()
 
 
@@ -940,8 +1141,13 @@ async def _summarize_and_trim(channel_id: int, to_summarize: list[str]):
             if summary:
                 channel_summaries.setdefault(channel_id, []).append(summary)
                 if len(channel_summaries[channel_id]) > MAX_SUMMARIES_PER_CHANNEL:
-                    channel_summaries[channel_id] = channel_summaries[channel_id][-MAX_SUMMARIES_PER_CHANNEL:]
-                debug.log("AI", f"Summarized {len(to_summarize)} messages for channel {channel_id}")
+                    channel_summaries[channel_id] = channel_summaries[channel_id][
+                        -MAX_SUMMARIES_PER_CHANNEL:
+                    ]
+                debug.log(
+                    "AI",
+                    f"Summarized {len(to_summarize)} messages for channel {channel_id}",
+                )
         except Exception as e:
             debug.log("AI", f"Background summarization failed: {e}")
         history = chat_memories.get(channel_id)
@@ -953,12 +1159,14 @@ async def _summarize_and_trim(channel_id: int, to_summarize: list[str]):
 
 def record_history(history, message, result, attachment_desc, tool_summaries):
     """Store the exchange in the channel's rolling history.
-    
+
     The history is stored newest-first (index 0 = most recent).
     Trimming is handled by background summarization — see _summarize_and_trim.
     """
     attachment_suffix = f" {attachment_desc}" if attachment_desc != "None" else ""
-    tool_summary_str = f" [Already completed: {'; '.join(tool_summaries)}]" if tool_summaries else ""
+    tool_summary_str = (
+        f" [Already completed: {'; '.join(tool_summaries)}]" if tool_summaries else ""
+    )
     history_entry = f"{message.author.display_name} at {datetime.now().strftime('%H:%M')}: {message.content.replace(chr(10), '. ')}{attachment_suffix}\nBong's response: {result.replace(chr(10), '. ')}{tool_summary_str}"
     history.insert(0, history_entry)
     debug.log("AI", f"response {len(history)}")
@@ -967,7 +1175,7 @@ def record_history(history, message, result, attachment_desc, tool_summaries):
 
 def record_passive_message(history, message, attachment_desc):
     """Store a non-Bong-targeted message in channel history for context.
-    
+
     Even messages not directed at Bong are recorded so the classifier and LLM
     have recent conversation context to work with.
     Trimming is handled by background summarization — see _summarize_and_trim.
@@ -978,25 +1186,35 @@ def record_passive_message(history, message, attachment_desc):
     debug.log("AI", f"remembered {len(history)}")
 
 
-async def process_voice_command(bot, guild, channel, user_id: int, username: str, text: str):
+async def process_voice_command(
+    bot, guild, channel, user_id: int, username: str, text: str
+):
     """Process a transcribed voice command through Bong's LLM pipeline.
 
     This is called by voice_commands.py when a wake word is detected.
     It mimics the on_message pipeline but with a synthesized message.
     """
     if channel is None:
-        debug.log("VoiceCmd", f"Cannot process voice command: no text channel (user={user_id})")
+        debug.log(
+            "VoiceCmd",
+            f"Cannot process voice command: no text channel (user={user_id})",
+        )
         return
 
     # Per-user cooldown to prevent rapid overlapping voice commands
     now = time.time()
     last_cmd = _voice_cooldowns.get(user_id, 0)
     if now - last_cmd < VOICE_COOLDOWN_SECONDS:
-        debug.log("VoiceCmd", f"Cooldown: user {user_id} sent voice command too quickly ({now - last_cmd:.1f}s < {VOICE_COOLDOWN_SECONDS}s)")
+        debug.log(
+            "VoiceCmd",
+            f"Cooldown: user {user_id} sent voice command too quickly ({now - last_cmd:.1f}s < {VOICE_COOLDOWN_SECONDS}s)",
+        )
         return
     _voice_cooldowns[user_id] = now
     if len(_voice_cooldowns) > 20:
-        oldest = sorted(_voice_cooldowns, key=lambda k: _voice_cooldowns[k])[:len(_voice_cooldowns) - 20]
+        oldest = sorted(_voice_cooldowns, key=lambda k: _voice_cooldowns[k])[
+            : len(_voice_cooldowns) - 20
+        ]
         for k in oldest:
             del _voice_cooldowns[k]
 
@@ -1007,25 +1225,46 @@ async def process_voice_command(bot, guild, channel, user_id: int, username: str
             vc = guild.voice_client
             voice_status_str = f"Connected to voice channel '{vc.channel.name}'."
             if bong_tools.current_track and (vc.is_playing() or vc.is_paused()):
-                voice_status_str += f"\nCurrently playing '{Path(bong_tools.current_track).stem}'."
+                voice_status_str += (
+                    f"\nCurrently playing '{Path(bong_tools.current_track).stem}'."
+                )
         if guild and voice_commands.is_listening(guild.id):
             voice_status_str += "\nVoice command listener is ACTIVE — listening for 'hey bong' wake word."
 
         # Build the system prompt using a synthetic approach
-        memories_str = bong_memory_helpers.retrieve_memories(f"{username}: {text}", user_id=user_id)
+        memories_str = bong_memory_helpers.retrieve_memories(
+            f"{username}: {text}", user_id=user_id
+        )
         summaries = channel_summaries.get(channel.id, [])
         summaries_str = ""
         if summaries:
-            summaries_str = "\n\nThe older conversation above has been summarized for context. These are compressed versions of what was discussed before the chat history you can see:\n" + "\n".join(f"- {s}" for s in summaries)
+            summaries_str = (
+                "\n\nThe older conversation above has been summarized for context. These are compressed versions of what was discussed before the chat history you can see:\n"
+                + "\n".join(f"- {s}" for s in summaries)
+            )
 
-        system_msg_content = prompt_template.replace("{username}", username).replace("{userID}", str(user_id)).replace("{message}", text).replace("{voice_status}", voice_status_str).replace("{attachments}", "").replace("{history}", "\n".join(history)).replace("{reply_context}", "").replace("{memories}", memories_str).replace("{summaries}", summaries_str)
+        system_msg_content = (
+            prompt_template.replace("{username}", username)
+            .replace("{userID}", str(user_id))
+            .replace("{message}", text)
+            .replace("{voice_status}", voice_status_str)
+            .replace("{attachments}", "")
+            .replace("{history}", "\n".join(history))
+            .replace("{reply_context}", "")
+            .replace("{memories}", memories_str)
+            .replace("{summaries}", summaries_str)
+        )
 
         messages = [HumanMessage(content=system_msg_content)]
 
-        last_prompt_path = BONG_DATA / "logs" / "last_prompt.log" if debug.is_debug() else None
+        last_prompt_path = (
+            BONG_DATA / "logs" / "last_prompt.log" if debug.is_debug() else None
+        )
         if last_prompt_path:
             last_prompt_path.parent.mkdir(parents=True, exist_ok=True)
-            last_prompt_path.write_text(system_msg_content + "\n\n========\n", encoding="utf-8")
+            last_prompt_path.write_text(
+                system_msg_content + "\n\n========\n", encoding="utf-8"
+            )
         debug.log_to_file("AI", f"VOICE COMMAND from {username} ({user_id}): {text}")
 
         # Set up shared state for this invocation
@@ -1035,7 +1274,9 @@ async def process_voice_command(bot, guild, channel, user_id: int, username: str
         bong_tools.current_channel_id = channel.id
 
         bound_model = base_model.bind_tools(bong_tools.tools)
-        result, tool_summaries = await run_tool_loop(bound_model, messages, [], [], last_prompt_path)
+        result, tool_summaries = await run_tool_loop(
+            bound_model, messages, [], [], last_prompt_path
+        )
 
         # Voice commands have no Discord message to react to, so discard any pending reactions
         bong_tools.pending_reactions.clear()
@@ -1054,11 +1295,18 @@ async def process_voice_command(bot, guild, channel, user_id: int, username: str
             class _FakeMessage:
                 def __init__(self, ch):
                     self.channel = ch
-            voice_error = await dispatch_voice_actions(guild, _FakeMessage(channel), bot=bot)
+
+            voice_error = await dispatch_voice_actions(
+                guild, _FakeMessage(channel), bot=bot
+            )
 
         # Send response to text channel
         if voice_error:
-            messages.append(HumanMessage(content=f"System: The voice/audio action failed with this error: {voice_error}. Please let the user know and suggest what they can do."))
+            messages.append(
+                HumanMessage(
+                    content=f"System: The voice/audio action failed with this error: {voice_error}. Please let the user know and suggest what they can do."
+                )
+            )
             error_response = await invoke_with_retry(bound_model, messages)
             error_text = _extract_response_text(error_response)
             await send_chunked(channel, error_text)
@@ -1082,14 +1330,16 @@ async def process_voice_command(bot, guild, channel, user_id: int, username: str
         debug.log_to_file("VoiceCmd", f"Error processing voice command: {e}")
         bong_tools.reset_pending()
         try:
-            await channel.send("Something went wrong processing that voice command. Try again?")
+            await channel.send(
+                "Something went wrong processing that voice command. Try again?"
+            )
         except Exception:
             pass
 
 
 class BongCog(commands.Cog):
     """Main Discord bot cog — handles all message events and the LLM tool loop."""
-    
+
     def __init__(self, bot):
         self.bot = bot
         self._processed_ids: set[int] = set()
@@ -1099,7 +1349,9 @@ class BongCog(commands.Cog):
         # Start the reminder checker background task
         self.reminder_task = self.bot.loop.create_task(self._check_reminders())
         # Start the periodic persist flush task
-        self.persist_task = self.bot.loop.create_task(self._flush_persist_periodically())
+        self.persist_task = self.bot.loop.create_task(
+            self._flush_persist_periodically()
+        )
         # Start the e621 subscription checker background task
         self.e621_task = self.bot.loop.create_task(self._check_e621_subscriptions())
 
@@ -1139,7 +1391,7 @@ class BongCog(commands.Cog):
         self.reminder_task.cancel()
         self.persist_task.cancel()
         self.e621_task.cancel()
-    
+
     async def _preload_channel(self):
         """Load recent message history from debug channels on startup so Bong has context."""
         await self.bot.wait_until_ready()
@@ -1157,9 +1409,17 @@ class BongCog(commands.Cog):
             active_channels.add(d_channel)
             history = chat_memories.setdefault(d_channel, [])
             async for msg in channel.history(limit=MAX_MEMORY_SIZE):
-                history.append(f"{msg.author.display_name} at {msg.created_at.strftime('%H:%M')}: {msg.content}")
-            channel_name = channel.name if hasattr(channel, "name") else f"DM with {channel.recipient}"
-            debug.log("AI", f"Preloaded {len(history)} messages from channel #{channel_name}")
+                history.append(
+                    f"{msg.author.display_name} at {msg.created_at.strftime('%H:%M')}: {msg.content}"
+                )
+            channel_name = (
+                channel.name
+                if hasattr(channel, "name")
+                else f"DM with {channel.recipient}"
+            )
+            debug.log(
+                "AI", f"Preloaded {len(history)} messages from channel #{channel_name}"
+            )
 
     async def _check_reminders(self):
         """Background task that checks for due reminders every 30 seconds and DMs the user."""
@@ -1191,6 +1451,7 @@ class BongCog(commands.Cog):
         """Background task that polls e621 for new posts matching subscribed tags and DMs users."""
         await self.bot.wait_until_ready()
         bong_e621.load_subscriptions()
+        await asyncio.sleep(bong_e621.E621_POLL_INTERVAL)
         while not self.bot.is_closed():
             if bong_e621.tag_registry:
                 debug.log("e621", f"Polling {len(bong_e621.tag_registry)} tag(s)")
@@ -1208,11 +1469,15 @@ class BongCog(commands.Cog):
                             pid = p.get("id", "?")
                             score = p.get("score", {}).get("total", 0)
                             rating = p.get("rating", "?")
-                            lines.append(f"  #{pid} [score:{score} rating:{rating}] https://e621.net/posts/{pid}")
+                            lines.append(
+                                f"  #{pid} [score:{score} rating:{rating}] https://e621.net/posts/{pid}"
+                            )
                         msg = "\n".join(lines)
                         for uid in subscriber_ids:
                             try:
-                                user = self.bot.get_user(uid) or await self.bot.fetch_user(uid)
+                                user = self.bot.get_user(
+                                    uid
+                                ) or await self.bot.fetch_user(uid)
                                 await user.send(msg)
                             except discord.Forbidden:
                                 pass
@@ -1251,7 +1516,9 @@ class BongCog(commands.Cog):
             last = self._user_cooldowns.get(message.author.id, 0)
             if now - last < 60:
                 remaining = int(60 - (now - last))
-                await message.channel.send(f"Slow down! Try again in {remaining}s.", delete_after=5)
+                await message.channel.send(
+                    f"Slow down! Try again in {remaining}s.", delete_after=5
+                )
                 return
             self._user_cooldowns[message.author.id] = now
 
@@ -1266,28 +1533,42 @@ class BongCog(commands.Cog):
                 active_channels.add(message.channel.id)
                 chat_memories.setdefault(message.channel.id, [])
                 async for msg in message.channel.history(limit=MAX_MEMORY_SIZE):
-                    chat_memories[message.channel.id].append(f"{msg.author.display_name} at {msg.created_at.strftime('%H:%M')}: {msg.content}")
+                    chat_memories[message.channel.id].append(
+                        f"{msg.author.display_name} at {msg.created_at.strftime('%H:%M')}: {msg.content}"
+                    )
 
         # For guild channels, only process messages in active channels and from users with llm permission
-        if not isinstance(message.channel, discord.DMChannel) and message.channel.id not in active_channels:
+        if (
+            not isinstance(message.channel, discord.DMChannel)
+            and message.channel.id not in active_channels
+        ):
             return
         # In guild channels, ignore users without llm permission
-        if not isinstance(message.channel, discord.DMChannel) and not user_data.has_permission(message.author.id, "llm"):
+        if not isinstance(
+            message.channel, discord.DMChannel
+        ) and not user_data.has_permission(message.author.id, "llm"):
             return
         # Ignore bot commands (messages starting with the command prefix that match a real command)
         if message.content.startswith(self.bot.command_prefix):
-            after_prefix = message.content[len(self.bot.command_prefix):].strip()
+            after_prefix = message.content[len(self.bot.command_prefix) :].strip()
             command_name = after_prefix.split()[0] if after_prefix else ""
             if command_name in self.bot.all_commands:
                 return
 
         # Read and categorize any attachments on the message
-        attachment_desc, image_attachments, text_attachments = await process_attachments(message)
+        (
+            attachment_desc,
+            image_attachments,
+            text_attachments,
+        ) = await process_attachments(message)
         # Get or create the channel's rolling history
         history = chat_memories.setdefault(message.channel.id, [])
 
         # Kick off background summarization if history exceeds the threshold
-        if len(history) >= MAX_MEMORY_SIZE and message.channel.id not in _summarization_in_progress:
+        if (
+            len(history) >= MAX_MEMORY_SIZE
+            and message.channel.id not in _summarization_in_progress
+        ):
             _summarization_in_progress.add(message.channel.id)
             to_summarize = list(history[-SUMMARIZE_CHUNK_SIZE:])
             asyncio.create_task(_summarize_and_trim(message.channel.id, to_summarize))
@@ -1300,12 +1581,19 @@ class BongCog(commands.Cog):
         replied = False
         reply_context = ""
         if message.reference is not None:
-            replied_to = await message.channel.fetch_message(message.reference.message_id)
+            replied_to = await message.channel.fetch_message(
+                message.reference.message_id
+            )
             replied = True
             reply_context = f"User is replying to {replied_to.author.display_name}: {replied_to.content.replace(chr(10), '. ')}"
 
         # If the message isn't directed at Bong, just record it as context and move on
-        if not await is_talking_to_bong(message.content.replace(chr(10), '. '), recent_messages, reply_context, self.bot.user.display_name):
+        if not await is_talking_to_bong(
+            message.content.replace(chr(10), ". "),
+            recent_messages,
+            reply_context,
+            self.bot.user.display_name,
+        ):
             record_passive_message(history, message, attachment_desc)
             return
 
@@ -1314,18 +1602,34 @@ class BongCog(commands.Cog):
             try:
                 guild = message.guild
                 _, voice_status = build_voice_status(guild)
-                system_msg = build_system_prompt(message, history, voice_status, attachment_desc, image_attachments, text_attachments, replied, replied_to)
+                system_msg = build_system_prompt(
+                    message,
+                    history,
+                    voice_status,
+                    attachment_desc,
+                    image_attachments,
+                    text_attachments,
+                    replied,
+                    replied_to,
+                )
 
                 # Start the message history with the system prompt
                 messages = [HumanMessage(content=system_msg)]
 
                 # Write the full prompt to the log file for debugging
-                last_prompt_path = BONG_DATA / "logs" / "last_prompt.log" if debug.is_debug() else None
+                last_prompt_path = (
+                    BONG_DATA / "logs" / "last_prompt.log" if debug.is_debug() else None
+                )
                 if last_prompt_path:
                     last_prompt_path.parent.mkdir(parents=True, exist_ok=True)
-                    last_prompt_path.write_text(system_msg + "\n\n========\n", encoding="utf-8")
+                    last_prompt_path.write_text(
+                        system_msg + "\n\n========\n", encoding="utf-8"
+                    )
 
-                debug.log_to_file("AI", f"QUERY from {message.author.display_name} ({message.author.id}): {message.content}")
+                debug.log_to_file(
+                    "AI",
+                    f"QUERY from {message.author.display_name} ({message.author.id}): {message.content}",
+                )
 
                 # Set up shared state for this message's tool loop
                 await update_voice_state(guild, message.author.id)
@@ -1336,19 +1640,31 @@ class BongCog(commands.Cog):
                 # Bind tools to a fresh model instance for this request
                 bound_model = base_model.bind_tools(bong_tools.tools)
                 # Run the LLM tool loop — this may involve multiple LLM calls and tool executions
-                result, tool_summaries = await run_tool_loop(bound_model, messages, image_attachments, text_attachments, last_prompt_path)
+                result, tool_summaries = await run_tool_loop(
+                    bound_model,
+                    messages,
+                    image_attachments,
+                    text_attachments,
+                    last_prompt_path,
+                )
 
                 # Add emoji reactions if the LLM called the react tool
                 await apply_reactions(message)
                 # Record the exchange in channel history
-                record_history(history, message, result, attachment_desc, tool_summaries)
+                record_history(
+                    history, message, result, attachment_desc, tool_summaries
+                )
 
                 # Dispatch all pending voice/audio/file actions
                 voice_error = await dispatch_voice_actions(guild, message, bot=self.bot)
 
                 # If a voice action failed, ask the LLM to explain the error to the user
                 if voice_error:
-                    messages.append(HumanMessage(content=f"System: The voice/audio action failed with this error: {voice_error}. Please let the user know and suggest what they can do."))
+                    messages.append(
+                        HumanMessage(
+                            content=f"System: The voice/audio action failed with this error: {voice_error}. Please let the user know and suggest what they can do."
+                        )
+                    )
                     error_response = await invoke_with_retry(bound_model, messages)
                     error_text = _extract_response_text(error_response)
                     await send_chunked(message.channel, error_text)
@@ -1359,7 +1675,11 @@ class BongCog(commands.Cog):
                 if bong_tools.pending_shutdown:
                     if user_data.has_permission(message.author.id, "admin"):
                         # Clear voice channel status before shutting down
-                        if message.guild and message.guild.voice_client and message.guild.voice_client.channel:
+                        if (
+                            message.guild
+                            and message.guild.voice_client
+                            and message.guild.voice_client.channel
+                        ):
                             await _set_voice_status(message.guild, None)
                         await message.add_reaction("🫡")
                         await self.bot.close()
@@ -1373,7 +1693,10 @@ class BongCog(commands.Cog):
                 debug.log_to_file("AI", f"Error generating response: {e}")
                 # Clear all pending state so it doesn't leak into the next message
                 bong_tools.reset_pending()
-                await send_chunked(message.channel, "Something went wrong processing that message. Try again?")
+                await send_chunked(
+                    message.channel,
+                    "Something went wrong processing that message. Try again?",
+                )
 
     @commands.command(name="llm", help="Toggle Bong's activity in the current channel")
     async def llm(self, ctx):
@@ -1389,15 +1712,21 @@ class BongCog(commands.Cog):
             # Load recent history so Bong has immediate context
             history = chat_memories.setdefault(ctx.channel.id, [])
             async for msg in ctx.channel.history(limit=MAX_MEMORY_SIZE):
-                history.append(f"{msg.author.display_name} at {msg.created_at.strftime('%H:%M')}: {msg.content}")
-            await ctx.send(f"Bong is now active in this channel! (ID: {ctx.channel.id})")
+                history.append(
+                    f"{msg.author.display_name} at {msg.created_at.strftime('%H:%M')}: {msg.content}"
+                )
+            await ctx.send(
+                f"Bong is now active in this channel! (ID: {ctx.channel.id})"
+            )
             debug.log("AI", history)
 
     @commands.group(name="tags", help="Manage user permission tags")
     async def tags(self, ctx):
         """Manage user permission tags. Admin only. Subcommands: list, add, remove."""
         if ctx.invoked_subcommand is None:
-            await ctx.send("Usage: @tags list <user_id> | @tags add <user_id> <tag> | @tags remove <user_id> <tag>\nTags: llm, llm_fast, music, vc_commands, e621, admin")
+            await ctx.send(
+                "Usage: @tags list <user_id> | @tags add <user_id> <tag> | @tags remove <user_id> <tag>\nTags: llm, llm_fast, music, vc_commands, e621, admin"
+            )
 
     @tags.command(name="list", help="List a user's permission tags")
     async def tags_list(self, ctx, user_id: int):
@@ -1418,10 +1747,14 @@ class BongCog(commands.Cog):
             await ctx.send("Only admins can use this command.")
             return
         if tag not in user_data.VALID_TAGS:
-            await ctx.send(f"Invalid tag '{tag}'. Valid tags: {', '.join(sorted(user_data.VALID_TAGS))}")
+            await ctx.send(
+                f"Invalid tag '{tag}'. Valid tags: {', '.join(sorted(user_data.VALID_TAGS))}"
+            )
             return
         user_data.add_permission(user_id, tag)
-        await ctx.send(f"Added '{tag}' tag to user {user_id}. Current tags: {', '.join(user_data.get_permissions(user_id))}")
+        await ctx.send(
+            f"Added '{tag}' tag to user {user_id}. Current tags: {', '.join(user_data.get_permissions(user_id))}"
+        )
 
     @tags.command(name="remove", help="Remove a permission tag from a user")
     async def tags_remove(self, ctx, user_id: int, tag: str):
@@ -1430,9 +1763,12 @@ class BongCog(commands.Cog):
             await ctx.send("Only admins can use this command.")
             return
         if user_data.remove_permission(user_id, tag):
-            await ctx.send(f"Removed '{tag}' tag from user {user_id}. Current tags: {', '.join(user_data.get_permissions(user_id))}")
+            await ctx.send(
+                f"Removed '{tag}' tag from user {user_id}. Current tags: {', '.join(user_data.get_permissions(user_id))}"
+            )
         else:
             await ctx.send(f"User {user_id} doesn't have the '{tag}' tag.")
+
 
 async def setup(bot):
     """Entry point for discord.py to load this cog."""

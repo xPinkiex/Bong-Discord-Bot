@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -20,7 +21,7 @@ _SUMMARIZE_PROMPT = (
     "{content}"
 )
 
-_SUMMARIZE_MODEL = ChatOllama(model="gemma3:12b-cloud", temperature=0.3, num_predict=256, keep_alive=-1)
+_SUMMARIZE_MODEL = ChatOllama(model=os.getenv("CLASSIFIER_MODEL", "gemma3:12b-cloud"), temperature=0.3, num_predict=256, keep_alive=-1)
 
 
 @tool

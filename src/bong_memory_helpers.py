@@ -1,4 +1,5 @@
 import difflib
+import os
 import re
 import sys
 from datetime import datetime, timedelta
@@ -41,7 +42,7 @@ CONTRADICTION_THRESHOLD = 0.75
 NEAR_DUPLICATE_THRESHOLD = 0.92
 MIN_RELEVANCE_USER = 0.3
 MIN_RELEVANCE_GENERAL = 0.5
-CONTRADICTION_MODEL = "gemma3:12b-cloud"
+CONTRADICTION_MODEL = os.getenv("CLASSIFIER_MODEL", "gemma3:12b-cloud")
 _contradiction_model = ChatOllama(model=CONTRADICTION_MODEL, temperature=0.0, num_predict=5, keep_alive=-1)
 
 

@@ -8,7 +8,6 @@
 #   --restore-backup           Restore all data files from their .bak backups on startup
 
 import argparse
-import discord
 import asyncio
 import logging as _logging
 import os
@@ -17,8 +16,10 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from dotenv import load_dotenv
+
+import discord
 from discord.ext import commands
+from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -31,14 +32,13 @@ import debug
 import user_data
 
 
-def _check_ollama_available(ollama_host=None, timeout=30):
-    import urllib.request
+def _check_ollama_available(ollama_host=None, timeout=5):
     import urllib.error
+    import urllib.request
 
-    ollama_host = ollama_host or os.getenv("OLLAMA_HOST", "127.0.0.1:11434")
-    _, _, port = ollama_host.partition(":")
-    port = port or "11434"
-    url = f"http://127.0.0.1:{port}/api/tags"
+    ollama_host = ollama_host or os.getenv("OLLAMA_HOST", "100.10.0.153:11434")
+    host = ollama_host if ollama_host.startswith("http") else f"http://{ollama_host}"
+    url = f"{host}/api/tags"
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -48,20 +48,74 @@ def _check_ollama_available(ollama_host=None, timeout=30):
                 debug.log("Ollama", f"Ollama is available at {ollama_host}")
                 return
         except (urllib.error.URLError, ConnectionRefusedError, OSError):
-            debug.log("Ollama", f"Ollama not reachable at {url}, retrying...")
+            debug.log("Ollama", f"Ollama not reachable at {ollama_host}, retrying...")
             time.sleep(0.5)
     raise RuntimeError(
-        f"Ollama is not running at {url}. "
+        f"Ollama is not running at {ollama_host}. "
         f"Start it with `ollama serve` or `systemctl start ollama.service`"
     )
+
+
+def _check_models_available():
+    """Verify all required Ollama models are present; exit with available list if not."""
+    import json
+    import urllib.request
+
+    ollama_host = os.getenv("OLLAMA_HOST", "100.10.0.153:11434")
+    host = ollama_host if ollama_host.startswith("http") else f"http://{ollama_host}"
+    url = f"{host}/api/tags"
+
+    required = {
+        "conversation": os.getenv("CONVERSATION_MODEL", "glm-5.2:cloud"),
+        "classifier":   os.getenv("CLASSIFIER_MODEL", "gemma3:12b-cloud"),
+        "embeddings":   "nomic-embed-text:latest",
+    }
+
+    try:
+        with urllib.request.urlopen(url, timeout=5) as r:
+            data = json.load(r)
+        available = {m["name"] for m in data.get("models", [])}
+    except Exception as e:
+        raise RuntimeError(f"Failed to query Ollama models at {url}: {e}") from e
+
+    missing = {role: name for role, name in required.items() if name not in available}
+
+    if missing:
+        print("\nERROR: Required Ollama models are missing:", file=sys.stderr)
+        for role, name in missing.items():
+            env_hint = ""
+            if role == "conversation":
+                env_hint = "  (set by CONVERSATION_MODEL env / .env)"
+            elif role == "classifier":
+                env_hint = "  (set by CLASSIFIER_MODEL env / .env)"
+            print(f"  - {role:<12}: {name!r}{env_hint}", file=sys.stderr)
+
+        print("\nAvailable models on the server:", file=sys.stderr)
+        if available:
+            for name in sorted(available):
+                print(f"  - {name}", file=sys.stderr)
+        else:
+            print("  (none)", file=sys.stderr)
+
+        print(
+            "\nSet CONVERSATION_MODEL / CLASSIFIER_MODEL in .env to an available model,\n"
+            "or install the missing models with:  ollama pull <model>",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    debug.log("Ollama", f"All required models present: {', '.join(required.values())}")
+
+
 _reboot_requested = False
 _restore_backup = False
 
 
 def _do_restore_backup():
-    import persist
     import bong_song_stats
+    import persist
     import reminders
+
     restored = persist.restore_all_from_backup()
     if restored:
         user_data.load_users()
@@ -108,8 +162,14 @@ def _console_reader(bot):
 def main():
     global _restore_backup
     parser = argparse.ArgumentParser(description="Bong Discord Bot")
-    parser.add_argument("-d", "--debug", action="store_true", help="Enable debug logging")
-    parser.add_argument("--restore-backup", action="store_true", help="Restore all data files from their .bak backups on startup")
+    parser.add_argument(
+        "-d", "--debug", action="store_true", help="Enable debug logging"
+    )
+    parser.add_argument(
+        "--restore-backup",
+        action="store_true",
+        help="Restore all data files from their .bak backups on startup",
+    )
     args = parser.parse_args()
 
     if args.debug:
@@ -119,6 +179,7 @@ def main():
     load_dotenv(PROJECT_ROOT / ".env")
 
     _check_ollama_available()
+    _check_models_available()
 
     TOKEN = os.getenv("DISCORD_TOKEN")
 
@@ -134,11 +195,11 @@ def main():
     @bot.event
     async def on_ready():
         """Called when the bot connects to Discord and is ready to receive events."""
-        debug.log("Bot", 'Bot booted, loading extensions...')
-        await bot.load_extension('src.bong')
-        import bong_tools
-        import bong_song_stats
+        debug.log("Bot", "Bot booted, loading extensions...")
+        await bot.load_extension("src.bong")
         import bong_memory_helpers
+        import bong_song_stats
+        import bong_tools
         import dm_approval
         import reminders
 
@@ -150,7 +211,7 @@ def main():
         bong_tools.start_time = datetime.now()
         user_data.load_users()
         reminders.load_reminders()
-        debug.log("Bot", f'Bot logged in as {bot.user}')
+        debug.log("Bot", f"Bot logged in as {bot.user}")
         if _restore_backup:
             _do_restore_backup()
         bot.loop.create_task(_setup_debugging())
@@ -164,23 +225,27 @@ def main():
         if not _DEBUG_SETUP_ENABLED:
             return
 
-    @bot.command(name='poweroff', help="Power off the bot")
+    @bot.command(name="poweroff", help="Power off the bot")
     async def poweroff(ctx):
         """Gracefully shut down the bot. Admin only."""
-        if not user_data.has_permission(ctx.author.id, "admin") and not await bot.is_owner(ctx.author):
+        if not user_data.has_permission(
+            ctx.author.id, "admin"
+        ) and not await bot.is_owner(ctx.author):
             await ctx.send("Only admins can use this command.")
             return
         await ctx.send("Onoffing...")
         await bot.close()
 
-    @bot.command(name='debug', help="Toggle debug mode")
+    @bot.command(name="debug", help="Toggle debug mode")
     async def toggle_debug_cmd(ctx, enabled: bool | None = None):
         """Toggle or set debug mode. Admin only.
 
         With no argument, toggles debug mode on/off.
         With True or False, explicitly sets it.
         """
-        if not user_data.has_permission(ctx.author.id, "admin") and not await bot.is_owner(ctx.author):
+        if not user_data.has_permission(
+            ctx.author.id, "admin"
+        ) and not await bot.is_owner(ctx.author):
             await ctx.send("Only admins can use this command.")
             return
         new_state = debug.toggle_debug(enabled)

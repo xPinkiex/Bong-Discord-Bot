@@ -109,7 +109,7 @@ class TestWakeWordDetection:
         async def mock_process(bot, guild, channel, user_id, username, text):
             calls.append(text)
 
-        with patch('voice_commands.user_data.is_authorized', return_value=True):
+        with patch('voice_commands.user_data.has_permission', return_value=True):
             with patch('bong.process_voice_command', side_effect=mock_process):
                 await sink._handle_transcription(222, "hey bong what time is it")
 
@@ -121,7 +121,7 @@ class TestWakeWordDetection:
         sink = BongVoiceSink(MagicMock(), MagicMock(), MagicMock(), MagicMock())
         sink.guild = MagicMock()
 
-        with patch('voice_commands.user_data.is_authorized', return_value=True):
+        with patch('voice_commands.user_data.has_permission', return_value=True):
             with patch('bong.process_voice_command') as mock_process:
                 await sink._handle_transcription(222, "hello what time is it")
                 mock_process.assert_called_once()
@@ -135,7 +135,7 @@ class TestWakeWordDetection:
         async def mock_process(bot, guild, channel, user_id, username, text):
             calls.append(text)
 
-        with patch('voice_commands.user_data.is_authorized', return_value=True):
+        with patch('voice_commands.user_data.has_permission', return_value=True):
             with patch('bong.process_voice_command', side_effect=mock_process):
                 await sink._handle_transcription(222, "hey bong, play music")
 
@@ -151,7 +151,7 @@ class TestWakeWordDetection:
         async def mock_process(bot, guild, channel, user_id, username, text):
             calls.append(text)
 
-        with patch('voice_commands.user_data.is_authorized', return_value=True):
+        with patch('voice_commands.user_data.has_permission', return_value=True):
             with patch('bong.process_voice_command', side_effect=mock_process):
                 await sink._handle_transcription(222, "hey bong")
 
@@ -167,7 +167,7 @@ class TestWakeWordDetection:
         async def mock_process(bot, guild, channel, user_id, username, text):
             calls.append(text)
 
-        with patch('voice_commands.user_data.is_authorized', return_value=True):
+        with patch('voice_commands.user_data.has_permission', return_value=True):
             with patch('bong.process_voice_command', side_effect=mock_process):
                 await sink._handle_transcription(222, "hey bong, play music")
 
@@ -183,7 +183,7 @@ class TestWakeWordDetection:
         async def mock_process(bot, guild, channel, user_id, username, text):
             calls.append(text)
 
-        with patch('voice_commands.user_data.is_authorized', return_value=True):
+        with patch('voice_commands.user_data.has_permission', return_value=True):
             with patch('bong.process_voice_command', side_effect=mock_process):
                 await sink._handle_transcription(222, "Hey Bong play music")
 
@@ -645,7 +645,7 @@ class TestPerUserOwwState:
 
     def test_authorized_user_gets_oww_state(self):
         voice_commands._oww_user_states.clear()
-        with patch('voice_commands.user_data.is_authorized', return_value=True):
+        with patch('voice_commands.user_data.has_permission', return_value=True):
             with patch('voice_commands._predict_for_user', return_value={"hey_bong": 0.0}):
                 sink = BongVoiceSink(MagicMock(), MagicMock(), MagicMock(), MagicMock())
                 user = MagicMock()
@@ -660,7 +660,7 @@ class TestPerUserOwwState:
 
     def test_unauthorized_user_skips_oww(self):
         voice_commands._oww_user_states.clear()
-        with patch('voice_commands.user_data.is_authorized', return_value=False):
+        with patch('voice_commands.user_data.has_permission', return_value=False):
             with patch('voice_commands._predict_for_user') as mock_predict:
                 sink = BongVoiceSink(MagicMock(), MagicMock(), MagicMock(), MagicMock())
                 user = MagicMock()
@@ -722,7 +722,7 @@ class TestPerUserOwwState:
         user = MagicMock()
         user.id = 700
         user.bot = False
-        with patch('voice_commands.user_data.is_authorized', return_value=False):
+        with patch('voice_commands.user_data.has_permission', return_value=False):
             data = MagicMock()
             data.pcm = np.zeros(SAMPLE_RATE // 50 * CHANNELS, dtype=np.int16).tobytes()
             data.packet = MagicMock()
@@ -730,3 +730,255 @@ class TestPerUserOwwState:
             sink._oww_buffers[700] = bytearray(b'\x00' * 100)
             sink.write(user, data)
             assert 700 not in sink._oww_buffers or len(sink._oww_buffers[700]) == 0
+
+
+class TestDaveExtensionFlags:
+
+    def _make_speech_frame(self, rms_value: int = 2000) -> bytes:
+        frame = np.full(SAMPLE_RATE // 50 * CHANNELS, rms_value, dtype=np.int16)
+        return frame.tobytes()
+
+    def test_needs_dave_inner_decrypt_skipped(self):
+        sink = BongVoiceSink(MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        user = MagicMock()
+        user.id = 123
+        user.bot = False
+        _activate_sink_user(sink, 123)
+        data = MagicMock()
+        data.pcm = self._make_speech_frame(2000)
+        data.packet = MagicMock()
+        data.packet.extension_data = {'_voice_recv_needs_dave_inner_decrypt': True}
+
+        sink.write(user, data)
+        assert 123 not in sink._buffers or len(sink._buffers[123]) == 0
+
+    def test_dave_inner_decrypted_passes_through(self):
+        sink = BongVoiceSink(MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        user = MagicMock()
+        user.id = 123
+        user.bot = False
+        _activate_sink_user(sink, 123)
+        data = MagicMock()
+        data.pcm = self._make_speech_frame(2000)
+        data.packet = MagicMock()
+        data.packet.extension_data = {
+            '_voice_recv_needs_dave_inner_decrypt': True,
+            '_voice_recv_dave_inner_decrypted': True,
+        }
+
+        sink.write(user, data)
+        assert 123 in sink._buffers
+        assert len(sink._buffers[123]) > 0
+
+    def test_dave_deferred_recovered_passes_through(self):
+        sink = BongVoiceSink(MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        user = MagicMock()
+        user.id = 123
+        user.bot = False
+        _activate_sink_user(sink, 123)
+        data = MagicMock()
+        data.pcm = self._make_speech_frame(2000)
+        data.packet = MagicMock()
+        data.packet.extension_data = {
+            '_voice_recv_needs_dave_inner_decrypt': False,
+            '_voice_recv_dave_inner_deferred_recovered': True,
+        }
+
+        sink.write(user, data)
+        assert 123 in sink._buffers
+        assert len(sink._buffers[123]) > 0
+
+    def test_decrypted_overrides_needs_decrypt(self):
+        sink = BongVoiceSink(MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        user = MagicMock()
+        user.id = 123
+        user.bot = False
+        _activate_sink_user(sink, 123)
+        data = MagicMock()
+        data.pcm = self._make_speech_frame(2000)
+        data.packet = MagicMock()
+        data.packet.extension_data = {
+            '_voice_recv_needs_dave_inner_decrypt': True,
+            '_voice_recv_dave_inner_decrypted': True,
+            '_voice_recv_dave_inner_deferred_recovered': True,
+        }
+
+        sink.write(user, data)
+        assert 123 in sink._buffers
+        assert len(sink._buffers[123]) > 0
+
+    def test_no_dave_flags_passes_through(self):
+        sink = BongVoiceSink(MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        user = MagicMock()
+        user.id = 123
+        user.bot = False
+        _activate_sink_user(sink, 123)
+        data = MagicMock()
+        data.pcm = self._make_speech_frame(2000)
+        data.packet = MagicMock()
+        data.packet.extension_data = {}
+
+        sink.write(user, data)
+        assert 123 in sink._buffers
+        assert len(sink._buffers[123]) > 0
+
+    def test_only_needs_decrypt_without_decrypted_flag_skipped(self):
+        sink = BongVoiceSink(MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        user = MagicMock()
+        user.id = 123
+        user.bot = False
+        _activate_sink_user(sink, 123)
+        data = MagicMock()
+        data.pcm = self._make_speech_frame(2000)
+        data.packet = MagicMock()
+        data.packet.extension_data = {
+            '_voice_recv_needs_dave_inner_decrypt': True,
+            '_voice_recv_dave_ranges_count': 3,
+        }
+
+        sink.write(user, data)
+        assert 123 not in sink._buffers or len(sink._buffers[123]) == 0
+
+
+class TestDaveDecryptedRatioGuard:
+
+    def _make_audio(self, peak: int, target_rms: int) -> bytes:
+        samples = SAMPLE_RATE // 50 * CHANNELS
+        if target_rms == 0:
+            return np.zeros(samples, dtype=np.int16).tobytes()
+        arr = np.full(samples, int(min(target_rms, 32767)), dtype=np.int16)
+        if peak > 0 and peak > target_rms:
+            arr[0] = min(peak, 32767)
+            arr[1] = max(-peak, -32768)
+        return arr.tobytes()
+
+    def _make_flat_audio(self, val: int) -> bytes:
+        samples = SAMPLE_RATE // 50 * CHANNELS
+        return np.full(samples, val, dtype=np.int16).tobytes()
+
+    def test_dave_decrypted_speech_like_high_peak_spiky_accepted(self):
+        sink = BongVoiceSink(MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        sink.guild = MagicMock()
+        user = MagicMock()
+        user.id = 123
+        user.bot = False
+        _activate_sink_user(sink, 123)
+        data = MagicMock()
+        data.pcm = self._make_audio(peak=9000, target_rms=500)
+        data.packet = MagicMock()
+        data.packet.extension_data = {
+            '_voice_recv_dave_inner_decrypted': True,
+            '_voice_recv_needs_dave_inner_decrypt': False,
+        }
+
+        sink.write(user, data)
+        assert 123 in sink._buffers
+        assert len(sink._buffers[123]) > 0
+
+    def test_dave_decrypted_loud_speech_like_accepted(self):
+        sink = BongVoiceSink(MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        sink.guild = MagicMock()
+        user = MagicMock()
+        user.id = 123
+        user.bot = False
+        _activate_sink_user(sink, 123)
+        data = MagicMock()
+        data.pcm = self._make_audio(peak=8000, target_rms=2000)
+        data.packet = MagicMock()
+        data.packet.extension_data = {
+            '_voice_recv_dave_inner_decrypted': True,
+            '_voice_recv_needs_dave_inner_decrypt': False,
+        }
+
+        sink.write(user, data)
+        assert 123 in sink._buffers
+        assert len(sink._buffers[123]) > 0
+
+    def test_dave_decrypted_flat_high_peak_rejected(self):
+        sink = BongVoiceSink(MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        sink.guild = MagicMock()
+        user = MagicMock()
+        user.id = 123
+        user.bot = False
+        _activate_sink_user(sink, 123)
+        data = MagicMock()
+        data.pcm = self._make_flat_audio(15000)
+        data.packet = MagicMock()
+        data.packet.extension_data = {
+            '_voice_recv_dave_inner_decrypted': True,
+            '_voice_recv_needs_dave_inner_decrypt': False,
+        }
+
+        sink.write(user, data)
+        assert 123 not in sink._buffers or len(sink._buffers[123]) == 0
+
+    def test_dave_deferred_recovered_flat_high_peak_rejected(self):
+        sink = BongVoiceSink(MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        sink.guild = MagicMock()
+        user = MagicMock()
+        user.id = 123
+        user.bot = False
+        _activate_sink_user(sink, 123)
+        data = MagicMock()
+        data.pcm = self._make_flat_audio(15000)
+        data.packet = MagicMock()
+        data.packet.extension_data = {
+            '_voice_recv_dave_inner_deferred_recovered': True,
+            '_voice_recv_needs_dave_inner_decrypt': False,
+        }
+
+        sink.write(user, data)
+        assert 123 not in sink._buffers or len(sink._buffers[123]) == 0
+
+    def test_non_dave_flat_high_peak_accepted(self):
+        sink = BongVoiceSink(MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        sink.guild = MagicMock()
+        user = MagicMock()
+        user.id = 123
+        user.bot = False
+        _activate_sink_user(sink, 123)
+        data = MagicMock()
+        data.pcm = self._make_flat_audio(5000)
+        data.packet = MagicMock()
+        data.packet.extension_data = {}
+
+        sink.write(user, data)
+        assert 123 in sink._buffers
+        assert len(sink._buffers[123]) > 0
+
+    def test_dave_decrypted_quiet_speech_low_ratio_accepted(self):
+        sink = BongVoiceSink(MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        sink.guild = MagicMock()
+        user = MagicMock()
+        user.id = 123
+        user.bot = False
+        _activate_sink_user(sink, 123)
+        data = MagicMock()
+        data.pcm = self._make_flat_audio(500)
+        data.packet = MagicMock()
+        data.packet.extension_data = {
+            '_voice_recv_dave_inner_decrypted': True,
+            '_voice_recv_needs_dave_inner_decrypt': False,
+        }
+
+        sink.write(user, data)
+        assert 123 in sink._buffers
+        assert len(sink._buffers[123]) > 0
+
+    def test_dave_decrypted_flat_above_ratio_guard_peak_rejected(self):
+        sink = BongVoiceSink(MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        sink.guild = MagicMock()
+        user = MagicMock()
+        user.id = 123
+        user.bot = False
+        _activate_sink_user(sink, 123)
+        data = MagicMock()
+        data.pcm = self._make_flat_audio(3000)
+        data.packet = MagicMock()
+        data.packet.extension_data = {
+            '_voice_recv_dave_inner_decrypted': True,
+            '_voice_recv_needs_dave_inner_decrypt': False,
+        }
+
+        sink.write(user, data)
+        assert 123 not in sink._buffers or len(sink._buffers[123]) == 0
