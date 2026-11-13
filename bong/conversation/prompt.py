@@ -67,8 +67,10 @@ class SpeakerSection:
     async def render(self, ctx: PromptContext) -> str | None:
         t = ctx.turn
         lines = [
-            f"Current time: {t.sent_at.strftime('%H:%M on %A, %Y-%m-%d')}.",
-            f"You are talking to {t.author_name} (to ping them write <@{t.author_id}>).",
+            f"Current time (background info — only mention it if someone asks or it matters): "
+            f"{t.sent_at.strftime('%H:%M on %A, %Y-%m-%d')}.",
+            f"You are talking to {t.author_name}. Just call them by name — don't ping them; "
+            f"you're already replying to them. (Their ping, only if you ever need it: <@{t.author_id}>)",
             "This is a private DM." if t.is_dm else "This is a server channel with other people in it.",
         ]
         if t.reply_to:

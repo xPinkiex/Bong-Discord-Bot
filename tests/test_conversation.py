@@ -66,7 +66,7 @@ async def test_respond_builds_prompt_and_records_both_sides():
     assert system["role"] == "system" and "green protogen" in system["content"]
     assert "Rado at" in system["content"] and "earlier chatter" in system["content"]
     assert "replying to this message from Rado: lol" in system["content"]
-    assert "<@1>" in system["content"]
+    assert "<@1>" in system["content"] and "don't ping them" in system["content"]
     assert user == {"role": "user", "content": "Eve: bong say hi"}
 
     entries = bong.history.get(100).entries
