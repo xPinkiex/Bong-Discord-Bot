@@ -79,6 +79,7 @@ class Bong:
         memory: MemoryStore | None = None,
         tools: list[Tool] | None = None,
         sections: list[PromptSection] | None = None,
+        extra_sections: list[PromptSection] | None = None,
         history_size: int = 30,
         summarize_chunk: int = 10,
         max_summaries: int = 5,
@@ -91,8 +92,8 @@ class Bong:
         self.tools = ToolBox(tools)
         self.history = HistoryStore(self._summarize, history_size, summarize_chunk, max_summaries)
         self.detector = Detector(llm, helper_model, classifier_context)
-        self.prompt = PromptBuilder(persona.load("persona"),
-                                    sections if sections is not None else default_sections(self.memory))
+        base = sections if sections is not None else default_sections(self.memory)
+        self.prompt = PromptBuilder(persona.load("persona"), base + list(extra_sections or []))
         self._locks: dict[int, asyncio.Lock] = {}
 
     # --- public API --------------------------------------------------------
@@ -104,8 +105,11 @@ class Bong:
         """Remember a message Bong isn't answering, as context for later."""
         self.history.add(turn.channel_id, self._entry(turn))
 
-    def record_own(self, channel_id: int, text: str) -> None:
-        self.history.add(channel_id, HistoryEntry("Bong", " ".join(text.split()), datetime.now(), is_bong=True))
+    def record_own(self, channel_id: int, text: str, tool_calls: list[str] | None = None) -> None:
+        text = " ".join(text.split())
+        if tool_calls:  # like the old bot, so she doesn't redo finished actions from history
+            text += f" [Already completed: {'; '.join(tool_calls)}]"
+        self.history.add(channel_id, HistoryEntry("Bong", text, datetime.now(), is_bong=True))
 
     async def respond(self, turn: Turn) -> Reply:
         # One reply at a time per channel keeps the history in order.
@@ -115,10 +119,10 @@ class Bong:
             messages = await self.prompt.build(PromptContext(turn, history))
             log.debug("Prompt for %s:\n%s", turn.author_name, messages[0]["content"])
 
-            text, tokens = await self._generate(turn, messages)
+            text, tokens, calls = await self._generate(turn, messages)
 
             self.history.add(turn.channel_id, self._entry(turn))
-            self.record_own(turn.channel_id, text)
+            self.record_own(turn.channel_id, text, calls)
 
         try:
             await self.memory.observe(turn, text)
@@ -128,9 +132,11 @@ class Bong:
 
     # --- internals ---------------------------------------------------------
 
-    async def _generate(self, turn: Turn, messages: list) -> tuple[str, int]:
-        """Call the chat model, running any tools it asks for, until it answers in text."""
+    async def _generate(self, turn: Turn, messages: list) -> tuple[str, int, list[str]]:
+        """Call the chat model, running any tools it asks for, until it answers in text.
+        Returns (reply, tokens used, short descriptions of the tool calls made)."""
         tokens = 0
+        calls: list[str] = []
         schemas = self.tools.schemas() or None
         for round_ in range(MAX_TOOL_ROUNDS + 1):
             # On the last round, offer no tools so the model has to answer.
@@ -143,6 +149,7 @@ class Bong:
                              "tool_calls": (result.raw_message or {}).get("tool_calls", [])})
             for call in result.tool_calls:
                 output = await self.tools.run(call.name, turn, call.arguments)
+                calls.append(f"{call.name}({', '.join(str(v) for v in call.arguments.values())})")
                 log.debug("Tool %s(%s) -> %s", call.name, call.arguments, output)
                 messages.append({"role": "tool", "content": output, "tool_name": call.name})
 
@@ -152,7 +159,7 @@ class Bong:
             result = await self.llm.chat(self.chat_model, messages, **CHAT_OPTIONS)
             tokens += result.total_tokens
             text = clean_reply(result.text) or "*tilts head* :3"
-        return text, tokens
+        return text, tokens, calls
 
     @staticmethod
     def _entry(turn: Turn) -> HistoryEntry:

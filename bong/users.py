@@ -7,6 +7,7 @@ Format (compatible with the old bot — unknown fields and tags are preserved):
 Tags that matter to the text bot:
     llm       talk to Bong
     llm_fast  talk to Bong without the cooldown (implies llm)
+    music     play music in voice channels
     admin     everything, plus admin commands
 The owner is always admin.
 """
@@ -17,7 +18,7 @@ from pathlib import Path
 
 from .storage import JsonFile
 
-TAGS = ("llm", "llm_fast", "admin")
+TAGS = ("llm", "llm_fast", "music", "admin")
 
 
 class UserStore:

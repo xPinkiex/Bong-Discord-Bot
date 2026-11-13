@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol
+from typing import Callable, Protocol
 
 from .. import persona
 from ..llm import ChatMessage
@@ -87,6 +87,16 @@ class HistorySection:
         return {"history": history, "summaries": summaries}
 
 
+class VoiceStatusSection:
+    """{voice_status} — whether Bong is in voice and what's playing (filled by the Discord layer)."""
+
+    def __init__(self, status_for: "Callable[[Turn], str]"):
+        self.status_for = status_for
+
+    async def render(self, ctx: PromptContext) -> dict[str, str]:
+        return {"voice_status": self.status_for(ctx.turn)}
+
+
 def default_sections(memory: MemoryStore) -> list[PromptSection]:
     return [MemorySection(memory), MessageSection(), HistorySection()]
 
@@ -97,7 +107,7 @@ class PromptBuilder:
         self.sections = sections
 
     async def build(self, ctx: PromptContext) -> list[ChatMessage]:
-        values: dict[str, str] = {}
+        values: dict[str, str] = {"voice_status": "Not in any voice channel."}
         for section in self.sections:
             values.update(await section.render(ctx))
         return [{"role": "user", "content": persona.fill(self.template, **values)}]

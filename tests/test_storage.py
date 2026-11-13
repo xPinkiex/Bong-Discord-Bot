@@ -57,7 +57,7 @@ def test_tag_rules(tmp_path):
     assert users.remove_tag(1, "llm_fast") and not users.has(1, "llm")
     assert not users.remove_tag(OWNER, "admin")
     with pytest.raises(ValueError):
-        users.add_tag(1, "music")
+        users.add_tag(1, "e621")
 
 
 def test_active_channels_persist(tmp_path):

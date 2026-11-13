@@ -11,15 +11,20 @@ from discord.ext import commands
 from ..channels import ActiveChannels
 from ..config import Settings
 from ..conversation.bong import Bong
+from ..conversation.prompt import VoiceStatusSection
 from ..conversation.turn import Turn
 from ..llm import OllamaClient
 from ..memory import NullMemoryStore
+from ..music.library import MusicLibrary
+from ..music.stats import SongStats
 from ..tools import Tool
+from ..tools.music import music_tools
 from ..tools.people import set_alias_tool
 from ..tools.time import current_time_tool
 from ..users import UserStore
 from .admin import AdminCog
 from .chat import ChatCog
+from .voice import VoiceController
 
 log = logging.getLogger(__name__)
 
@@ -40,17 +45,23 @@ class BongBot(commands.Bot):
         self.user_store = UserStore(settings.user_data_dir / "users.json", settings.owner_id)
         self.active_channels = ActiveChannels(settings.data_dir / "active_channels.json")
         self.llm = OllamaClient(settings.ollama_host, api_key=settings.ollama_api_key)
+        self.library = MusicLibrary(settings.data_dir / "saved_sounds")
+        self.song_stats = SongStats(settings.data_dir / "song_stats.json")
+        self.voice = VoiceController(self, self.library, self.song_stats)
+        self.add_listener(self.voice.on_voice_state_update)
         self.bong: Bong | None = None  # built in setup_hook, once memory is loaded
 
     async def setup_hook(self) -> None:
         # Runs once, before connecting — unlike on_ready, which repeats on reconnect.
         self.user_store.load()
         self.active_channels.load()
+        self.song_stats.load()
         await self._check_ollama()
 
         tools: list[Tool] = [
             current_time_tool(self.user_store.timezone),
             set_alias_tool(self.user_store, self.resolve_name),
+            *music_tools(self.voice, self.library, lambda uid: self.user_store.has(uid, "music")),
         ]
         memory = await self._start_memory()
         if memory is not None:
@@ -64,6 +75,7 @@ class BongBot(commands.Bot):
             helper_model=s.helper_model,
             memory=memory or NullMemoryStore(),
             tools=tools,
+            extra_sections=[VoiceStatusSection(lambda turn: self.voice.status_for_prompt(turn.guild_id))],
             history_size=s.history_size,
             summarize_chunk=s.summarize_chunk,
             max_summaries=s.max_summaries,
@@ -134,5 +146,9 @@ class BongBot(commands.Bot):
                  self.user, self.user.id if self.user else "?", len(list(self.active_channels)))
 
     async def close(self) -> None:
+        try:
+            await self.voice.shutdown()
+        except Exception:
+            log.exception("Error leaving voice channels")
         await self.llm.close()
         await super().close()
