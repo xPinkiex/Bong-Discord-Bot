@@ -2,6 +2,7 @@
 
     python -m bong.memory.migrate               # dry run: shows what would be imported
     python -m bong.memory.migrate --apply       # import
+    python -m bong.memory.migrate --about 273761843544064000 --apply   # only memories about these users
 
 Only the text and metadata are taken; everything is re-embedded with the
 pinned model. The old database is copied to a temp folder first, so it's
@@ -58,8 +59,11 @@ def read_old(old_db: Path) -> list[dict]:
     return [r for r in rows if r["text"].strip()]
 
 
-async def migrate(old_db: Path, store: ChromaMemoryStore, apply: bool) -> dict[str, int]:
+async def migrate(old_db: Path, store: ChromaMemoryStore, apply: bool,
+                  about: set[int] | None = None) -> dict[str, int]:
     rows = read_old(old_db)
+    if about:
+        rows = [r for r in rows if r["about_user_id"] in about]
     counts = {"found": len(rows), "imported": 0, "already_imported": 0, "duplicates": 0}
     await store.start()
     existing = {m.metadata.get("migrated_from") for m in await store.all()}
@@ -83,13 +87,15 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="python -m bong.memory.migrate", description=__doc__.split("\n\n")[0])
     parser.add_argument("old_db", nargs="?", type=Path, default=PROJECT_ROOT / "bong_data" / "chroma_db")
     parser.add_argument("--apply", action="store_true", help="actually import (default is a dry run)")
+    parser.add_argument("--about", type=int, action="append", metavar="USER_ID",
+                        help="only import memories about this Discord user ID (repeatable)")
     parser.add_argument("--data-dir", type=Path, default=PROJECT_ROOT / "bong_data")
     args = parser.parse_args(argv)
 
     if not args.old_db.exists():
         raise SystemExit(f"No old memory database at {args.old_db}")
     store = ChromaMemoryStore(args.data_dir / "memory", PinnedMiniLM(args.data_dir / "embedding_model"))
-    counts = asyncio.run(migrate(args.old_db, store, args.apply))
+    counts = asyncio.run(migrate(args.old_db, store, args.apply, set(args.about or [])))
     print(", ".join(f"{k.replace('_', ' ')}: {v}" for k, v in counts.items()))
     if not args.apply:
         print("Dry run — run again with --apply to import.")

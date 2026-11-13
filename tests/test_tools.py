@@ -82,3 +82,31 @@ async def test_no_tools_means_none_offered():
     llm = ScriptedLLM([ChatResult(text="hi")])
     await Bong(llm, chat_model="c", helper_model="h").respond(make_turn("bong"))
     assert llm.calls[0]["tools"] is None
+
+
+# --- set_alias -----------------------------------------------------------------
+
+async def test_set_alias_for_self_others_and_clearing(tmp_path):
+    from bong.tools.people import set_alias_tool
+    from bong.users import UserStore
+
+    users = UserStore(tmp_path / "users.json", owner_id=99)
+    users.load()
+    users.add_tag(5, "admin")
+    names = {"rado": (2, "RadonFox"), "eve": (1, "Not Reed")}
+    tool = set_alias_tool(users, lambda n, t: names.get(n.lower()))
+    eve = make_turn(author_id=1, author_name="Not Reed")
+
+    assert await tool.handler(eve, {"alias": "Eve"}) == 'From now on, call Not Reed "Eve".'
+    assert users.alias(1) == "Eve"
+    out = await tool.handler(eve, {"alias": "Stinky", "about": "Rado"})
+    assert "can't choose what RadonFox is called" in out and users.alias(2) is None
+
+    admin = make_turn(author_id=5, author_name="Boss")
+    await tool.handler(admin, {"alias": "Radon", "about": "rado"})
+    assert users.alias(2) == "Radon"
+    assert "Couldn't find anyone" in await tool.handler(admin, {"alias": "X", "about": "nobody"})
+
+    await tool.handler(make_turn(author_id=1, author_name="Eve"), {"alias": ""})
+    assert users.alias(1) is None
+    assert "too long" in await tool.handler(eve, {"alias": "x" * 40})

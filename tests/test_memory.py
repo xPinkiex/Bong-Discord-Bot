@@ -239,3 +239,7 @@ async def test_migration_imports_old_memories_once(tmp_path):
 
     again = await migrate(old_dir, store, apply=True)
     assert again["already_imported"] == 3 and await store.count() == 3
+
+    only_rado = ChromaMemoryStore(tmp_path / "memory2", WordEmbedder())
+    counts = await migrate(old_dir, only_rado, apply=True, about={RADO})
+    assert counts["found"] == 1 and [m.text for m in await only_rado.all()] == ["Rado has a cat"]

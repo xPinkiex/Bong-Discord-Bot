@@ -174,3 +174,15 @@ def test_old_bot_notifications_are_left_out_of_history():
     assert is_notification(msg("Approved **RadonFox** (773961674314219530) with tags: llm"), me)
     assert not is_notification(msg("*boops* :3"), me)
     assert not is_notification(msg("New e621 post matching 'x'", author=FRIEND), me)  # only Bong's own
+
+
+async def test_alias_replaces_discord_name_everywhere(setup):
+    bot, cog, llm = setup
+    bot.user_store.set_alias(FRIEND, "Eve")
+    bot.active_channels.toggle(CHANNEL)
+    channel = make_channel()
+    await cog.on_message(make_message("just chatting", channel=channel))
+    await cog.on_message(make_message("bong hi", author_id=OWNER, channel=channel))
+    prompt = llm.calls_to("chat")[0][1][0]["content"]
+    assert "Eve at" in prompt and f"user{FRIEND}" not in prompt
+    assert bot.resolve_name("eve", SimpleNamespace(guild_id=None)) == (FRIEND, "Eve")

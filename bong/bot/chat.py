@@ -45,7 +45,7 @@ class ChatCog(commands.Cog):
         try:
             async for msg in channel.history(limit=self.bot.settings.history_size, before=before):
                 if (msg.content or msg.attachments) and not is_notification(msg, me):
-                    entries.append(to_history_entry(msg, me))
+                    entries.append(to_history_entry(msg, me, self.bot.name_of))
         except discord.HTTPException as e:
             log.warning("Could not load history for channel %s: %s", getattr(channel, "id", "?"), e)
         entries.reverse()  # Discord returns newest first
@@ -87,7 +87,7 @@ class ChatCog(commands.Cog):
         if not bong.history.has(message.channel.id):
             await self.load_history(message.channel, before=message)
 
-        turn = to_turn(message, self.bot.user, await self._replied_message(message))
+        turn = to_turn(message, self.bot.user, await self._replied_message(message), self.bot.name_of)
 
         # People without access still count as conversation context in active channels.
         if not allowed or not await bong.is_for_bong(turn):

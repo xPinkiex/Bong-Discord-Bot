@@ -75,6 +75,18 @@ class AdminCog(commands.Cog, name="Admin"):
         else:
             await ctx.send(f"{user.display_name} doesn't have `{tag}` (or it can't be removed).")
 
+    @commands.command(name="alias", help="Set what Bong calls someone (no name = clear)")
+    async def alias(self, ctx: commands.Context, user: discord.User, *, name: str = ""):
+        name = " ".join(name.split())
+        if len(name) > 32:
+            await ctx.send("That name is too long (32 characters max).")
+            return
+        self.bot.user_store.set_alias(user.id, name or None)
+        if name:
+            await ctx.send(f"Bong will call {user.display_name} \"{name}\".")
+        else:
+            await ctx.send(f"Cleared {user.display_name}'s alias.")
+
     @commands.command(name="poweroff", help="Shut the bot down")
     async def poweroff(self, ctx: commands.Context):
         await ctx.send("Onoffing...")

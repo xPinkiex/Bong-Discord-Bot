@@ -7,7 +7,8 @@ This branch is a ground-up rewrite of the text side of Bong: chatting, per-user 
 ## What she does
 
 - **Chats in character.** Her prompt is [`bong/persona/persona.md`](bong/persona/persona.md): the original prompt word for word, minus the lines for features that aren't back yet, plus permission to swear. Like the original, it's sent as one user message with history newest first. Edit that file to change how she talks.
-- **Uses tools.** Right now: `current_time` and her memory tools (below). It uses the timezone saved in `users.json` (from the old bot) or the time where she's running. Tools live in `bong/tools/`, and a new one is a name, a description and an async function.
+- **Uses tools.** Right now: `current_time`, `set_alias` and her memory tools (below).
+- **Calls people what they want.** Say "call me Eve" and she saves an alias with `set_alias`. From then on the alias replaces the Discord name in messages, history, replies and name lookups. People set their own; admins can set anyone's, also with `@alias <user> <name>`. Aliases live in `users.json`. It uses the timezone saved in `users.json` (from the old bot) or the time where she's running. Tools live in `bong/tools/`, and a new one is a name, a description and an async function.
 - **Knows when she's being talked to.** DMs, pings, replies to her, and any message containing "bong" are answered directly. Anything else in an active channel goes to a small classifier model ([`classifier.md`](bong/persona/classifier.md)) that's told to lean towards "yes".
 - **Follows the conversation.** Each channel keeps a rolling history of the last 30 messages, including ones not meant for her. When it fills up, the oldest 10 are summarized in the background (up to 5 summaries are kept). On first use, history is loaded from Discord, skipping automated messages like the old bot's e621 alerts and approval notices.
 - **Understands replies.** If you reply to a message, she sees what you replied to.
@@ -24,6 +25,7 @@ This branch is a ground-up rewrite of the text side of Bong: chatting, per-user 
 | `@tags list <user>` | Show someone's tags (`<user>` = mention or ID) |
 | `@tags add <user> <tag>` | Give a tag: `llm`, `llm_fast`, `admin` |
 | `@tags remove <user> <tag>` | Take a tag away |
+| `@alias <user> [name]` | Set what Bong calls someone (no name clears it) |
 | `@debug [on/off]` | Toggle debug logging (logs full prompts) |
 | `@poweroff` | Shut down |
 
@@ -49,7 +51,7 @@ bong/
     chroma_store.py    Chroma-backed store: recall ranking, dedupe, backups, re-embedding
     embedder.py        Pinned all-MiniLM-L6-v2 (hash-checked)
     migrate.py         Import from the old bot's chroma_db
-  tools/               Tool + ToolBox; time.py (current_time); memory.py (save/recall/update/forget)
+  tools/               Tool + ToolBox; time.py (current_time); people.py (set_alias); memory.py (save/recall/update/forget)
   bot/                 The discord.py layer
     client.py          BongBot: builds everything once in setup_hook
     chat.py            on_message pipeline
@@ -103,6 +105,8 @@ Files in `bong_data/memory/`: the Chroma database, `embedding.json` (model + pro
 ```bash
 python -m bong.memory.migrate            # dry run: lists what would be imported
 python -m bong.memory.migrate --apply    # import from bong_data/chroma_db
+python -m bong.memory.migrate --about 273761843544064000 --about 773961674314219530 --apply
+                                         # only memories about these Discord users
 ```
 
 Texts and metadata (who, category, importance, date) are copied and re-embedded with the pinned model. The old database is read from a temporary copy, so it's never modified. Running it again skips memories that were already imported.

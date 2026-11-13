@@ -15,6 +15,7 @@ from ..conversation.turn import Turn
 from ..llm import OllamaClient
 from ..memory import NullMemoryStore
 from ..tools import Tool
+from ..tools.people import set_alias_tool
 from ..tools.time import current_time_tool
 from ..users import UserStore
 from .admin import AdminCog
@@ -47,7 +48,10 @@ class BongBot(commands.Bot):
         self.active_channels.load()
         await self._check_ollama()
 
-        tools: list[Tool] = [current_time_tool(self.user_store.timezone)]
+        tools: list[Tool] = [
+            current_time_tool(self.user_store.timezone),
+            set_alias_tool(self.user_store, self.resolve_name),
+        ]
         memory = await self._start_memory()
         if memory is not None:
             from ..tools.memory import memory_tools
@@ -84,20 +88,27 @@ class BongBot(commands.Bot):
             log.exception("Long-term memory failed to start; running without it")
             return None
 
+    def name_of(self, user: discord.abc.User) -> str:
+        """What Bong calls someone: their alias if they have one, else their display name."""
+        return self.user_store.alias(user.id) or user.display_name
+
     def resolve_name(self, name: str, turn: Turn) -> tuple[int, str] | None:
-        """Match a display name to a Discord user: this server's members (or every shared server in DMs)."""
-        wanted = name.strip().lower()
+        """Match a name to a Discord user: aliases first, then this server's members
+        (or every shared server in DMs). Returns (user_id, the name Bong uses for them)."""
+        wanted = name.strip().lstrip("@").lower()
+        by_name: dict[str, tuple[int, str]] = {}
+        for uid, alias in self.user_store.aliases().items():
+            by_name.setdefault(alias.lower(), (uid, alias))
         guild = self.get_guild(turn.guild_id) if turn.guild_id else None
         members = list(guild.members) if guild else list(self.get_all_members())
-        by_name: dict[str, tuple[int, str]] = {}
         for m in members:
             if m.bot:
                 continue
             for n in (m.display_name, m.global_name, m.name):
                 if n:
-                    by_name.setdefault(n.lower(), (m.id, m.display_name))
+                    by_name.setdefault(n.lower(), (m.id, self.name_of(m)))
         for uid, entry in self.user_store.known_names().items():
-            by_name.setdefault(entry.lower(), (uid, entry))
+            by_name.setdefault(entry.lower(), (uid, self.user_store.alias(uid) or entry))
         if wanted in by_name:
             return by_name[wanted]
         close = difflib.get_close_matches(wanted, list(by_name), n=1, cutoff=0.85)

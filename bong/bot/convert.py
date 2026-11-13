@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Callable
+
 import discord
 
 from ..conversation.history import HistoryEntry
@@ -37,12 +39,19 @@ def _local(dt):
     return dt.astimezone().replace(tzinfo=None)
 
 
+NameOf = Callable[[discord.abc.User], str]
+
+
+def _display(user: discord.abc.User) -> str:
+    return user.display_name
+
+
 def to_turn(message: discord.Message, me: discord.abc.User,
-            replied: discord.Message | None) -> Turn:
+            replied: discord.Message | None, name_of: NameOf = _display) -> Turn:
     reply_info = None
     if replied is not None:
         reply_info = ReplyInfo(
-            author_name=replied.author.display_name,
+            author_name=name_of(replied.author),
             author_id=replied.author.id,
             content=replied.clean_content,
             is_bong=replied.author.id == me.id,
@@ -50,7 +59,7 @@ def to_turn(message: discord.Message, me: discord.abc.User,
     mentions_bong = any(u.id == me.id for u in message.mentions) or bool(reply_info and reply_info.is_bong)
     return Turn(
         author_id=message.author.id,
-        author_name=message.author.display_name,
+        author_name=name_of(message.author),
         channel_id=message.channel.id,
         content=message.clean_content,
         guild_id=message.guild.id if message.guild else None,
@@ -61,12 +70,12 @@ def to_turn(message: discord.Message, me: discord.abc.User,
     )
 
 
-def to_history_entry(message: discord.Message, me: discord.abc.User) -> HistoryEntry:
+def to_history_entry(message: discord.Message, me: discord.abc.User, name_of: NameOf = _display) -> HistoryEntry:
     text = " ".join(message.clean_content.split())
     if message.attachments:
         text = f"{text} [attached: {', '.join(a.filename for a in message.attachments)}]".strip()
     return HistoryEntry(
-        author_name=message.author.display_name,
+        author_name=name_of(message.author),
         text=text,
         at=_local(message.created_at),
         is_bong=message.author.id == me.id,

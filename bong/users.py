@@ -1,7 +1,8 @@
 """Per-user permission tags and stats, stored in bong_user_data/users.json.
 
 Format (compatible with the old bot — unknown fields and tags are preserved):
-    {"273761843544064000": {"allowed": ["admin"], "display_name": "Eve", "tokens": 1234}, ...}
+    {"273761843544064000": {"allowed": ["admin"], "alias": "Eve", "display_name": "Not Reed", "tokens": 1234}, ...}
+"alias" is what Bong calls the person instead of their Discord display name.
 
 Tags that matter to the text bot:
     llm       talk to Bong
@@ -91,6 +92,22 @@ class UserStore:
         """UTC offset in hours saved for this user (by the old bot), or None."""
         value = self._users.get(user_id, {}).get("timezone")
         return float(value) if isinstance(value, (int, float)) else None
+
+    def alias(self, user_id: int) -> str | None:
+        """What Bong calls this person instead of their Discord name, if set."""
+        return self._users.get(user_id, {}).get("alias") or None
+
+    def set_alias(self, user_id: int, alias: str | None) -> None:
+        entry = self._users.setdefault(user_id, {})
+        alias = " ".join((alias or "").split())[:32]
+        if alias:
+            entry["alias"] = alias
+        else:
+            entry.pop("alias", None)
+        self.save()
+
+    def aliases(self) -> dict[int, str]:
+        return {uid: e["alias"] for uid, e in self._users.items() if e.get("alias")}
 
     def known_names(self) -> dict[int, str]:
         """Display names seen for users (saved when they were approved or chatted)."""
