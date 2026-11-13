@@ -85,6 +85,13 @@ class UserStore:
             entry["display_name"] = display_name
         self.save()
 
+    # --- settings ----------------------------------------------------------
+
+    def timezone(self, user_id: int) -> float | None:
+        """UTC offset in hours saved for this user (by the old bot), or None."""
+        value = self._users.get(user_id, {}).get("timezone")
+        return float(value) if isinstance(value, (int, float)) else None
+
     # --- stats -------------------------------------------------------------
 
     def add_tokens(self, user_id: int, count: int, display_name: str = "") -> None:

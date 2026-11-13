@@ -6,9 +6,10 @@ This branch is a ground-up rewrite of the text side of Bong. It focuses on chatt
 
 ## What she does
 
-- **Chats in character.** Her personality lives in [`bong/persona/persona.md`](bong/persona/persona.md). Edit that file to change how she talks.
+- **Chats in character.** Her prompt is [`bong/persona/persona.md`](bong/persona/persona.md): the original prompt word for word, minus the lines for features that aren't back yet, plus permission to swear. Like the original, it's sent as one user message with history newest first. Edit that file to change how she talks.
+- **Uses tools.** Right now there's one, `current_time`. It uses the timezone saved in `users.json` (from the old bot) or the time where she's running. Tools live in `bong/tools/`, and a new one is a name, a description and an async function.
 - **Knows when she's being talked to.** DMs, pings, replies to her, and any message containing "bong" are answered directly. Anything else in an active channel goes to a small classifier model ([`classifier.md`](bong/persona/classifier.md)) that's told to lean towards "yes".
-- **Follows the conversation.** Each channel keeps a rolling history of the last 30 messages, including ones not meant for her. When it fills up, the oldest 10 are summarized in the background (up to 5 summaries are kept). On first use, history is loaded from Discord.
+- **Follows the conversation.** Each channel keeps a rolling history of the last 30 messages, including ones not meant for her. When it fills up, the oldest 10 are summarized in the background (up to 5 summaries are kept). On first use, history is loaded from Discord, skipping automated messages like the old bot's e621 alerts and approval notices.
 - **Understands replies.** If you reply to a message, she sees what you replied to.
 - **Has permissions.** Per-user tags (`llm`, `llm_fast`, `admin`) are stored in `bong_user_data/users.json`. The file format is the same as the old bot's, so existing files keep working and unknown fields are preserved.
 - **Has a DM approval flow.** When someone without access DMs her, the owner gets buttons: Chat / Chat (no cooldown) / Admin / Deny.
@@ -42,9 +43,10 @@ bong/
     turn.py            Turn: one incoming message as plain data
     history.py         Per-channel history + background summaries
     detector.py        "Is this for Bong?"
-    prompt.py          Prompt built from pluggable sections
-    bong.py            Bong: is_for_bong / record / respond, Cooldown
+    prompt.py          Fills persona.md from pluggable sections
+    bong.py            Bong: is_for_bong / record / respond (with tool loop), Cooldown
   memory/              Memory + MemoryStore interface, NullMemoryStore
+  tools/               Tool + ToolBox; time.py (current_time)
   bot/                 The discord.py layer
     client.py          BongBot: builds everything once in setup_hook
     chat.py            on_message pipeline
@@ -62,7 +64,7 @@ on_message (bot/chat.py)
   → build a Turn (who, where, text, reply target)
   → bong.is_for_bong(turn)?  no → bong.record(turn) as context
   → cooldown check (unless llm_fast/admin)
-  → bong.respond(turn): PromptBuilder runs each section → chat model → reply
+  → bong.respond(turn): sections fill persona.md → chat model ⇄ tools (max 5 rounds) → reply
   → send (split at 2000 chars), add token count to the user
 ```
 
@@ -78,10 +80,10 @@ class MemoryStore(Protocol):
     async def observe(self, turn: Turn, reply: str) -> None: ...
 ```
 
-- `recall` runs before every reply. Whatever it returns appears in the prompt under "Long-term memories". `turn.author_id` tells you whose memories to fetch.
+- `recall` runs before every reply. Whatever it returns fills `{memories}` in the prompt. `turn.author_id` tells you whose memories to fetch.
 - `observe` runs after every reply, so a store can pull out facts to save.
 
-To turn memories on, write a class with those two methods (backed by JSON, ChromaDB or anything else) and pass it in: `BongBot(settings, memory=MyStore(...))` in `bong/__main__.py`. Nothing else changes. For other kinds of context (time, server info, etc.), write a `PromptSection` and add it in `conversation/prompt.py:default_sections`.
+To turn memories on, write a class with those two methods (backed by JSON, ChromaDB or anything else) and pass it in: `BongBot(settings, memory=MyStore(...))` in `bong/__main__.py`. Nothing else changes. Memory tools (save/recall/forget) can be added as `Tool`s in `bong/tools/`. For other kinds of context, write a `PromptSection` that returns `{"placeholder": text}`, put `{placeholder}` in `persona.md`, and add the section in `conversation/prompt.py:default_sections`.
 
 ## Setup
 

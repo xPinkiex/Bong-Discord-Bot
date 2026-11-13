@@ -8,6 +8,31 @@ from ..conversation.history import HistoryEntry
 from ..conversation.turn import ReplyInfo, Turn
 
 
+# Automated messages the bot sends (including the old bot's features). They aren't
+# conversation, so they're left out when history is loaded from Discord.
+NOTIFICATION_PREFIXES = (
+    "New e621 post matching",
+    "\u23f0 **Reminder**",
+    "\U0001f512 **DM Access Request**",
+    "Approved **",
+    "Denied **",
+    "Slow down! Try again in",
+    "Eve has approved you",
+    "Eve has denied your request",
+    "I've sent your request to Eve",
+    "Your approval request has timed out",
+    "Your request is still pending",
+    "You've been approved to talk with me",
+    "Your request to talk with me was denied",
+    "Your access request timed out",
+    "I've asked ",
+)
+
+
+def is_notification(message: discord.Message, me: discord.abc.User) -> bool:
+    return message.author.id == me.id and message.content.startswith(NOTIFICATION_PREFIXES)
+
+
 def _local(dt):
     return dt.astimezone().replace(tzinfo=None)
 

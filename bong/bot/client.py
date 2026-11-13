@@ -12,6 +12,7 @@ from ..config import Settings
 from ..conversation.bong import Bong
 from ..llm import OllamaClient
 from ..memory import MemoryStore, NullMemoryStore
+from ..tools.time import current_time_tool
 from ..users import UserStore
 from .admin import AdminCog
 from .chat import ChatCog
@@ -40,6 +41,7 @@ class BongBot(commands.Bot):
             chat_model=settings.chat_model,
             helper_model=settings.helper_model,
             memory=memory or NullMemoryStore(),
+            tools=[current_time_tool(self.user_store.timezone)],
             history_size=settings.history_size,
             summarize_chunk=settings.summarize_chunk,
             max_summaries=settings.max_summaries,

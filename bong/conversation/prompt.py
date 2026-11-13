@@ -1,16 +1,21 @@
-"""Builds the messages sent to the chat model.
+"""Builds the message sent to the chat model.
 
-The system prompt is the persona followed by a list of *sections*. Each section
-looks at the current turn and returns a block of text (or None to skip). To
-give Bong a new kind of context, write a section and add it to the list in
-``default_sections`` — e.g. ``MemorySection`` is how memories get in.
+Like the original bot, the whole prompt — persona, context and the user's
+message — is one *user* message made by filling ``persona/persona.md``.
+
+Each placeholder in that file ({memories}, {history}, ...) is filled by a
+*section*. A section returns a dict of placeholder → text. To give Bong a new
+kind of context, write a section, add its placeholder to persona.md, and add
+it to ``default_sections``. ``MemorySection`` is how memories get in.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol
 
+from .. import persona
 from ..llm import ChatMessage
 from ..memory import Memory, MemoryStore
 from .history import ChannelHistory
@@ -24,79 +29,79 @@ class PromptContext:
 
 
 class PromptSection(Protocol):
-    async def render(self, ctx: PromptContext) -> str | None: ...
+    async def render(self, ctx: PromptContext) -> dict[str, str]: ...
+
+
+def _one_line(text: str) -> str:
+    return text.replace("\n", ". ")
 
 
 class MemorySection:
-    """Long-term memories from the memory store, if it has any."""
+    """{memories} — long-term memories from the memory store (empty for now)."""
 
     def __init__(self, store: MemoryStore, limit: int = 8):
         self.store = store
         self.limit = limit
 
-    async def render(self, ctx: PromptContext) -> str | None:
+    async def render(self, ctx: PromptContext) -> dict[str, str]:
         memories = await self.store.recall(ctx.turn, self.limit)
-        if not memories:
-            return None
-        return "Long-term memories (facts you've learned about people and things):\n" + "\n".join(
-            f"- {_format_memory(m)}" for m in memories
-        )
+        return {"memories": "\n".join(_format_memory(m) for m in memories)}
 
 
 def _format_memory(m: Memory) -> str:
     return f"[about {m.about_name}] {m.text}" if m.about_name else m.text
 
 
-class SummarySection:
-    async def render(self, ctx: PromptContext) -> str | None:
-        if not ctx.history.summaries:
-            return None
-        return ("Summary of the older conversation in this channel:\n"
-                + "\n".join(f"- {s}" for s in ctx.history.summaries))
+class MessageSection:
+    """{username} {userID} {message} {attachments} {reply_context} — the current message."""
+
+    async def render(self, ctx: PromptContext) -> dict[str, str]:
+        t = ctx.turn
+        values = {
+            "username": t.author_name,
+            "userID": str(t.author_id),
+            "message": _one_line(t.content),
+            "attachments": "",
+            "reply_context": "",
+        }
+        if t.attachments:
+            values["attachments"] = (f"\nAttachments included with this message: {', '.join(t.attachments)} "
+                                     f"(you can't open attachments right now)\n")
+        if t.reply_to:
+            r = t.reply_to
+            values["reply_context"] = (
+                "\nThe user is replying to a message. Take into account what they're replying to when responding.\n\n"
+                f"Replied-to user ID: {r.author_id}\n"
+                f"The user replied to: {r.author_name} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}: "
+                f"{_one_line(r.content)}\n"
+            )
+        return values
 
 
 class HistorySection:
-    async def render(self, ctx: PromptContext) -> str | None:
-        if not ctx.history.entries:
-            return None
-        return ("Recent chat history (read-only context, oldest first):\n"
-                + "\n".join(e.render() for e in ctx.history.entries))
+    """{history} {summaries} — recent chat (newest first, like the original) and older summaries."""
 
-
-class SpeakerSection:
-    async def render(self, ctx: PromptContext) -> str | None:
-        t = ctx.turn
-        lines = [
-            f"Current time (background info — only mention it if someone asks or it matters): "
-            f"{t.sent_at.strftime('%H:%M on %A, %Y-%m-%d')}.",
-            f"You are talking to {t.author_name}. Just call them by name — don't ping them; "
-            f"you're already replying to them. (Their ping, only if you ever need it: <@{t.author_id}>)",
-            "This is a private DM." if t.is_dm else "This is a server channel with other people in it.",
-        ]
-        if t.reply_to:
-            who = "you (Bong)" if t.reply_to.is_bong else t.reply_to.author_name
-            lines.append(f"They are replying to this message from {who}: "
-                         f"{' '.join(t.reply_to.content.split())}")
-        return "\n".join(lines)
+    async def render(self, ctx: PromptContext) -> dict[str, str]:
+        history = "\n".join(e.render() for e in reversed(ctx.history.entries))
+        summaries = ""
+        if ctx.history.summaries:
+            summaries = ("\n\nThe older conversation above has been summarized for context. These are compressed "
+                         "versions of what was discussed before the chat history you can see:\n"
+                         + "\n".join(f"- {s}" for s in ctx.history.summaries))
+        return {"history": history, "summaries": summaries}
 
 
 def default_sections(memory: MemoryStore) -> list[PromptSection]:
-    return [MemorySection(memory), SummarySection(), HistorySection(), SpeakerSection()]
+    return [MemorySection(memory), MessageSection(), HistorySection()]
 
 
 class PromptBuilder:
-    def __init__(self, persona_text: str, sections: list[PromptSection]):
-        self.persona_text = persona_text
+    def __init__(self, template: str, sections: list[PromptSection]):
+        self.template = template
         self.sections = sections
 
     async def build(self, ctx: PromptContext) -> list[ChatMessage]:
-        blocks = [self.persona_text]
+        values: dict[str, str] = {}
         for section in self.sections:
-            block = await section.render(ctx)
-            if block:
-                blocks.append(block)
-        user_line = f"{ctx.turn.author_name}: {ctx.turn.display_text()}"
-        return [
-            {"role": "system", "content": "\n\n".join(blocks)},
-            {"role": "user", "content": user_line},
-        ]
+            values.update(await section.render(ctx))
+        return [{"role": "user", "content": persona.fill(self.template, **values)}]

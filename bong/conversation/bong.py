@@ -20,6 +20,7 @@ from datetime import datetime
 from .. import persona
 from ..llm import LLM
 from ..memory import MemoryStore, NullMemoryStore
+from ..tools import Tool, ToolBox
 from .detector import Detector
 from .history import HistoryEntry, HistoryStore
 from .prompt import PromptBuilder, PromptContext, PromptSection, default_sections
@@ -31,6 +32,7 @@ log = logging.getLogger(__name__)
 _SPEAKER_PREFIX = re.compile(r"^\s*bong(?: at \d{1,2}:\d{2})?\s*:\s*", re.IGNORECASE)
 
 CHAT_OPTIONS = {"temperature": 0.5, "num_predict": 2000, "repeat_penalty": 1.6}
+MAX_TOOL_ROUNDS = 5
 SUMMARY_OPTIONS = {"temperature": 0.3, "num_predict": 300}
 
 SUMMARY_PROMPT = (
@@ -75,6 +77,7 @@ class Bong:
         chat_model: str,
         helper_model: str,
         memory: MemoryStore | None = None,
+        tools: list[Tool] | None = None,
         sections: list[PromptSection] | None = None,
         history_size: int = 30,
         summarize_chunk: int = 10,
@@ -85,6 +88,7 @@ class Bong:
         self.chat_model = chat_model
         self.helper_model = helper_model
         self.memory = memory or NullMemoryStore()
+        self.tools = ToolBox(tools)
         self.history = HistoryStore(self._summarize, history_size, summarize_chunk, max_summaries)
         self.detector = Detector(llm, helper_model, classifier_context)
         self.prompt = PromptBuilder(persona.load("persona"),
@@ -111,14 +115,7 @@ class Bong:
             messages = await self.prompt.build(PromptContext(turn, history))
             log.debug("Prompt for %s:\n%s", turn.author_name, messages[0]["content"])
 
-            result = await self.llm.chat(self.chat_model, messages, **CHAT_OPTIONS)
-            tokens = result.total_tokens
-            text = clean_reply(result.text)
-            if not text:
-                log.info("Empty reply from %s, retrying once", self.chat_model)
-                result = await self.llm.chat(self.chat_model, messages, **CHAT_OPTIONS)
-                tokens += result.total_tokens
-                text = clean_reply(result.text) or "*tilts head* :3"
+            text, tokens = await self._generate(turn, messages)
 
             self.history.add(turn.channel_id, self._entry(turn))
             self.record_own(turn.channel_id, text)
@@ -130,6 +127,32 @@ class Bong:
         return Reply(text, tokens)
 
     # --- internals ---------------------------------------------------------
+
+    async def _generate(self, turn: Turn, messages: list) -> tuple[str, int]:
+        """Call the chat model, running any tools it asks for, until it answers in text."""
+        tokens = 0
+        schemas = self.tools.schemas() or None
+        for round_ in range(MAX_TOOL_ROUNDS + 1):
+            # On the last round, offer no tools so the model has to answer.
+            offer = schemas if round_ < MAX_TOOL_ROUNDS else None
+            result = await self.llm.chat(self.chat_model, messages, tools=offer, **CHAT_OPTIONS)
+            tokens += result.total_tokens
+            if not result.tool_calls or not offer:
+                break
+            messages.append({"role": "assistant", "content": result.text,
+                             "tool_calls": (result.raw_message or {}).get("tool_calls", [])})
+            for call in result.tool_calls:
+                output = await self.tools.run(call.name, turn, call.arguments)
+                log.debug("Tool %s(%s) -> %s", call.name, call.arguments, output)
+                messages.append({"role": "tool", "content": output, "tool_name": call.name})
+
+        text = clean_reply(result.text)
+        if not text:
+            log.info("Empty reply from %s, retrying once", self.chat_model)
+            result = await self.llm.chat(self.chat_model, messages, **CHAT_OPTIONS)
+            tokens += result.total_tokens
+            text = clean_reply(result.text) or "*tilts head* :3"
+        return text, tokens
 
     @staticmethod
     def _entry(turn: Turn) -> HistoryEntry:

@@ -53,24 +53,29 @@ async def test_classifier_error_means_no():
 
 # --- replying ---------------------------------------------------------------
 
-async def test_respond_builds_prompt_and_records_both_sides():
+async def test_respond_builds_original_style_prompt_and_records_both_sides():
     llm = FakeLLM({CHAT: ["Bong at 14:30: *wags tail* hi Eve :3"]})
     bong = make_bong(llm)
-    bong.record(make_turn("earlier chatter", author_name="Rado", author_id=2))
+    bong.record(make_turn("first", author_name="Rado", author_id=2))
+    bong.record(make_turn("second", author_name="Rado", author_id=2))
 
-    reply = await bong.respond(make_turn("bong say hi", reply_to=ReplyInfo("Rado", 2, "lol")))
+    reply = await bong.respond(make_turn("bong say hi\nplease", reply_to=ReplyInfo("Rado", 2, "lol")))
 
     assert reply.text == "*wags tail* hi Eve :3"   # speaker prefix stripped
     assert reply.tokens == 15
-    system, user = llm.calls_to(CHAT)[0][1]
-    assert system["role"] == "system" and "green protogen" in system["content"]
-    assert "Rado at" in system["content"] and "earlier chatter" in system["content"]
-    assert "replying to this message from Rado: lol" in system["content"]
-    assert "<@1>" in system["content"] and "don't ping them" in system["content"]
-    assert user == {"role": "user", "content": "Eve: bong say hi"}
+    messages = llm.calls_to(CHAT)[0][1]
+    assert len(messages) == 1 and messages[0]["role"] == "user"   # one user message, like the original
+    prompt = messages[0]["content"]
+    assert prompt.startswith("You are a female furry named Bong")
+    assert "You're allowed to swear." in prompt
+    assert "Here is the user's name: Eve and userID: 1" in prompt
+    assert "User message:\nbong say hi. please" in prompt
+    assert "The user replied to: Rado at" in prompt and ": lol" in prompt
+    assert prompt.index("Rado at 14:30: second") < prompt.index("Rado at 14:30: first")  # newest first
+    assert "{" not in prompt                         # every placeholder filled
 
     entries = bong.history.get(100).entries
-    assert [e.author_name for e in entries] == ["Rado", "Eve", "Bong"]
+    assert [e.author_name for e in entries] == ["Rado", "Rado", "Eve", "Bong"]
     assert entries[-1].is_bong
 
 
@@ -95,8 +100,9 @@ async def test_channels_are_independent():
     assert [e.author_name for e in bong.history.get(1).entries] == ["A", "Bong"]
     assert [e.author_name for e in bong.history.get(2).entries] == ["B", "Bong"]
     for _, messages, _ in llm.calls_to(CHAT):
-        speaker = messages[1]["content"].split(":")[0]
-        assert f"You are talking to {speaker}" in messages[0]["content"]
+        prompt = messages[0]["content"]
+        speaker = prompt.split("Here is the user's name: ")[1].split(" ")[0]
+        assert f"User message:\nbong {'1' if speaker == 'A' else '2'}" in prompt
 
 
 # --- memory seam ------------------------------------------------------------
@@ -122,10 +128,12 @@ async def test_memory_store_is_queried_and_observed():
     assert "[about Eve] loves dubstep" in llm.calls_to(CHAT)[0][1][0]["content"]
 
 
-async def test_no_memory_section_when_store_is_empty():
+async def test_memory_block_is_empty_when_store_is_empty():
     llm = FakeLLM()
     await make_bong(llm).respond(make_turn("bong"))
-    assert "Long-term memories" not in llm.calls_to(CHAT)[0][1][0]["content"]
+    prompt = llm.calls_to(CHAT)[0][1][0]["content"]
+    after = prompt.split("Long-term memories (facts you've saved about people and things if any):\n")[1]
+    assert after.startswith("\n\nHere is the user's name")
 
 
 # --- history ----------------------------------------------------------------

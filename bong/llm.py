@@ -9,18 +9,26 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Literal, Protocol, TypedDict
+from typing import Any, Literal, Protocol, TypedDict
 
 import aiohttp
 
 log = logging.getLogger(__name__)
 
-Role = Literal["system", "user", "assistant"]
+Role = Literal["system", "user", "assistant", "tool"]
 
 
-class ChatMessage(TypedDict):
+class ChatMessage(TypedDict, total=False):
     role: Role
     content: str
+    tool_calls: list[dict]   # assistant messages that call tools
+    tool_name: str           # tool result messages
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    name: str
+    arguments: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -28,6 +36,8 @@ class ChatResult:
     text: str
     prompt_tokens: int = 0
     output_tokens: int = 0
+    tool_calls: tuple[ToolCall, ...] = ()
+    raw_message: dict | None = None   # the assistant message as returned, for tool loops
 
     @property
     def total_tokens(self) -> int:
@@ -35,7 +45,8 @@ class ChatResult:
 
 
 class LLM(Protocol):
-    async def chat(self, model: str, messages: list[ChatMessage], **options) -> ChatResult: ...
+    async def chat(self, model: str, messages: list[ChatMessage], tools: list[dict] | None = None,
+                   **options) -> ChatResult: ...
 
 
 class LLMError(RuntimeError):
@@ -76,13 +87,16 @@ class OllamaClient:
         if self._session and not self._session.closed:
             await self._session.close()
 
-    async def chat(self, model: str, messages: list[ChatMessage], **options) -> ChatResult:
-        payload = {
+    async def chat(self, model: str, messages: list[ChatMessage], tools: list[dict] | None = None,
+                   **options) -> ChatResult:
+        payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "stream": False,
             "options": options,
         }
+        if tools:
+            payload["tools"] = tools
         if self._keep_alive:
             payload["keep_alive"] = -1
         attempts = len(self.RETRY_DELAYS) + 1
@@ -96,10 +110,13 @@ class OllamaClient:
                         body = await resp.text()
                         raise LLMError(f"Ollama returned {resp.status} for {model}: {body[:300]}")
                     data = await resp.json()
+                message = data.get("message") or {}
                 return ChatResult(
-                    text=(data.get("message") or {}).get("content", "") or "",
+                    text=message.get("content", "") or "",
                     prompt_tokens=data.get("prompt_eval_count", 0) or 0,
                     output_tokens=data.get("eval_count", 0) or 0,
+                    tool_calls=_parse_tool_calls(message),
+                    raw_message=message,
                 )
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 if attempt == attempts - 1:
@@ -109,3 +126,19 @@ class OllamaClient:
                             attempt + 1, attempts, delay, e)
                 await asyncio.sleep(delay)
         raise AssertionError("unreachable")
+
+
+def _parse_tool_calls(message: dict) -> tuple[ToolCall, ...]:
+    calls = []
+    for tc in message.get("tool_calls") or []:
+        fn = tc.get("function") or {}
+        args = fn.get("arguments") or {}
+        if isinstance(args, str):  # some models send a JSON string
+            import json
+            try:
+                args = json.loads(args)
+            except ValueError:
+                args = {}
+        if fn.get("name"):
+            calls.append(ToolCall(fn["name"], args if isinstance(args, dict) else {}))
+    return tuple(calls)

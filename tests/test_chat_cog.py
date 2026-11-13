@@ -161,3 +161,16 @@ async def test_llm_failure_sends_error_message(setup):
     msg = make_message("bong hi")
     await cog.on_message(msg)
     msg.channel.send.assert_awaited_once_with("Something went wrong processing that message. Try again?")
+
+
+def test_old_bot_notifications_are_left_out_of_history():
+    from bong.bot.convert import is_notification
+    me = SimpleNamespace(id=BONG_ID)
+
+    def msg(text, author=BONG_ID):
+        return SimpleNamespace(author=SimpleNamespace(id=author), content=text)
+
+    assert is_notification(msg("New e621 post matching 'paws': #1 https://e621.net/posts/1"), me)
+    assert is_notification(msg("Approved **RadonFox** (773961674314219530) with tags: llm"), me)
+    assert not is_notification(msg("*boops* :3"), me)
+    assert not is_notification(msg("New e621 post matching 'x'", author=FRIEND), me)  # only Bong's own

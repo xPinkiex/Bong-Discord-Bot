@@ -12,7 +12,7 @@ from discord.ext import commands
 from ..conversation.bong import Cooldown
 from ..textutil import split_message
 from .approval import ApprovalManager
-from .convert import to_history_entry, to_turn
+from .convert import is_notification, to_history_entry, to_turn
 
 if TYPE_CHECKING:
     from .client import BongBot
@@ -44,7 +44,7 @@ class ChatCog(commands.Cog):
         entries = []
         try:
             async for msg in channel.history(limit=self.bot.settings.history_size, before=before):
-                if msg.content or msg.attachments:
+                if (msg.content or msg.attachments) and not is_notification(msg, me):
                     entries.append(to_history_entry(msg, me))
         except discord.HTTPException as e:
             log.warning("Could not load history for channel %s: %s", getattr(channel, "id", "?"), e)
