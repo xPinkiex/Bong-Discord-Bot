@@ -1,8 +1,26 @@
 [project]
 name = "bong"
-version = "0.1.0"
-requires-python = ">=3.12"
-dependencies = []
+version = "0.2.0"
+description = "Bong, a protogen Discord chat bot"
+requires-python = ">=3.10"
+dependencies = [
+    "discord.py>=2.4",
+    "aiohttp>=3.9",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 
 [project.scripts]
-bong = "bong_cli:main"
+bong = "bong.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["bong*"]
+
+[tool.setuptools.package-data]
+"bong.persona" = ["*.md"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

@@ -47,3 +47,7 @@ CONTEXT.md
 
 # todo
 todo.txt
+# Rewrite
+bong_data/active_channels.json
+*.bak
+*.tmp
