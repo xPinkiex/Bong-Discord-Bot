@@ -61,8 +61,28 @@ class MessageSection:
             "reply_context": "",
         }
         if t.attachments:
-            values["attachments"] = (f"\nAttachments included with this message: {', '.join(t.attachments)} "
-                                     f"(you can't open attachments right now)\n")
+            # Same wording as the old bot.
+            parts, counts = [], {"image": 0, "text": 0}
+            for a in t.attachments:
+                if a.kind == "image":
+                    size = f" ({a.width}x{a.height})" if a.width and a.height else ""
+                    parts.append(f"[Image {counts['image']}: {a.filename}{size}]")
+                    counts["image"] += 1
+                elif a.kind == "text":
+                    parts.append(f"[Text file {counts['text']}: {a.filename}]")
+                    counts["text"] += 1
+                elif a.kind == "video":
+                    parts.append(f"[Video: {a.filename}]")
+                else:
+                    parts.append(f"[File: {a.filename}]")
+            block = f"\nAttachments included with this message: {', '.join(parts)}\n"
+            if counts["image"]:
+                block += ("\nYou have image attachments on this message. ALWAYS call describe_image to look at "
+                          "them before responding. Never ignore an image.\n")
+            if counts["text"]:
+                block += ("\nYou have text file attachments on this message. ALWAYS call read_text_file to read "
+                          "them before responding. Never ignore a text file.\n")
+            values["attachments"] = block
         if t.reply_to:
             r = t.reply_to
             values["reply_context"] = (

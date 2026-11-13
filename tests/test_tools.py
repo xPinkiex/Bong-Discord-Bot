@@ -39,7 +39,7 @@ async def test_time_tool_uses_saved_timezone():
 async def test_time_tool_without_timezone_uses_bongs_clock():
     tool = current_time_tool(lambda uid: None, now=lambda: FIXED)
     out = await tool.handler(make_turn(author_id=2, author_name="Rado"), {})
-    assert out.startswith("Current time where Bong is:") and "Rado hasn't saved a timezone" in out
+    assert out.startswith("Current time where Bong is:") and "Rado hasn't set a timezone" in out
 
 
 async def test_tool_loop_runs_tool_and_feeds_result_back():

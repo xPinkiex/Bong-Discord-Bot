@@ -23,6 +23,7 @@ class ChatMessage(TypedDict, total=False):
     content: str
     tool_calls: list[dict]   # assistant messages that call tools
     tool_name: str           # tool result messages
+    images: list[str]        # base64 images (vision models)
 
 
 @dataclass(frozen=True)

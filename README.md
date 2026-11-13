@@ -2,12 +2,12 @@
 
 A Discord chat bot with a protogen personality, powered by a local or cloud LLM through [Ollama](https://ollama.com).
 
-This branch is a ground-up rewrite of Bong: chatting, per-user long-term memory, music in voice channels, and tools, with the code split into small modules. Voice commands, e621, reminders and web search from the old bot are not included yet.
+This branch is a ground-up rewrite of Bong: chatting, per-user long-term memory, music, reminders, web search, images and more, with the code split into small modules. Voice commands, e621 and the console were dropped on purpose.
 
 ## What she does
 
 - **Chats in character.** Her prompt is [`bong/persona/persona.md`](bong/persona/persona.md): the original prompt word for word, minus the lines for features that aren't back yet, plus permission to swear. Like the original, it's sent as one user message with history newest first. Edit that file to change how she talks.
-- **Uses tools.** Right now: `current_time`, `set_alias`, her memory tools and music tools (below).
+- **Uses tools.** See [Tools](#tools). They're async functions that act directly and report back in a sentence.
 - **Calls people what they want.** Say "call me Eve" and she saves an alias with `set_alias`. From then on the alias replaces the Discord name in messages, history, replies and name lookups. People set their own; admins can set anyone's, also with `@alias <user> <name>`. Aliases live in `users.json`. It uses the timezone saved in `users.json` (from the old bot) or the time where she's running. Tools live in `bong/tools/`, and a new one is a name, a description and an async function.
 - **Knows when she's being talked to.** DMs, pings, replies to her, and any message containing "bong" are answered directly. Anything else in an active channel goes to a small classifier model ([`classifier.md`](bong/persona/classifier.md)) that's told to lean towards "yes".
 - **Follows the conversation.** Each channel keeps a rolling history of the last 30 messages, including ones not meant for her. When it fills up, the oldest 10 are summarized in the background (up to 5 summaries are kept). On first use, history is loaded from Discord, skipping automated messages like the old bot's e621 alerts and approval notices.
@@ -52,13 +52,18 @@ bong/
     chroma_store.py    Chroma-backed store: recall ranking, dedupe, backups, re-embedding
     embedder.py        Pinned all-MiniLM-L6-v2 (hash-checked)
     migrate.py         Import from the old bot's chroma_db
-  tools/               Tool + ToolBox; time.py, people.py (set_alias), memory.py, music.py
+    manage.py          Command-line memory management
+  timeparse.py         Timezones, "tomorrow at 3pm" parsing, durations
+  reminders.py         Reminder storage
+  tools/               Tool + ToolBox; time, reminders, web, files, people, admin, memory, music
+
   bot/                 The discord.py layer
     client.py          BongBot: builds everything once in setup_hook
     chat.py            on_message pipeline
     admin.py           Admin commands
     approval.py        DM approval buttons
     voice.py           VoiceController: voice connections + playback, one Player per server
+    background.py      Reminder delivery loop
     convert.py         discord.Message → Turn / HistoryEntry
 ```
 
@@ -76,6 +81,23 @@ on_message (bot/chat.py)
 ```
 
 Who is talking travels in the `Turn` object instead of in global variables. Replies are handled one at a time per channel, so history stays in order, and different channels don't block each other.
+
+## Tools
+
+| Area | Tools | Notes |
+|---|---|---|
+| Time | `current_time`, `set_timezone`, `get_timezone` | Cities and zone names ("Warsaw", "Europe/Warsaw") follow daylight saving time; offsets/abbreviations ("UTC+2", "CET") are fixed. Saved in `users.json`; old offsets keep working |
+| Reminders | `set_reminder`, `list_reminders_tool`, `cancel_reminder` | Delivered by DM; stored in `bong_user_data/reminders.json` (old format). Ones that came due while she was offline are delivered late instead of dropped |
+| Web | `web_search`, `youtube_search`, `summarize_url` | Search tries several engines. `summarize_url` refuses private/local addresses (incl. after redirects), so nobody can make her fetch things on your network |
+| Images & files | `describe_image`, `read_text_file`, `list_images`, `send_image`, `list_texts`, `send_text` | Images go to the helper model (vision) and are saved to `bong_data/saved_images` with a 5-word label as the name; text files to `bong_data/saved_texts` |
+| Chat | `react`, `set_alias` | |
+| Admin | `bot_stats`, `shutdown` | `shutdown` only works for admins |
+| Memory | `save_memory`, `recall_memories`, `update_memory`, `forget_memory` | See [Memory](#memory) |
+| Music | `join_voice`, `play_audio`, ... | See [Music](#music) |
+
+Time phrases understood by reminders: "tomorrow at 3pm", "friday at 12:00" (today if it's still ahead), "next monday at 9am", "at 18", "noon", "31.5 at 10:22" (day.month; rolls to next year if passed), "24.12.2026", "june 5", "2026-06-05 15:00", "6/5/2026" (month/day). Durations: "30 minutes", "1h 30m", "2 days". The old parser crashed on a bare time ("at 3pm") and was off by the server's UTC offset; both are fixed.
+
+Tools that send files, add reactions or shut down put the request in the message's *outbox*, and `bot/chat.py` carries it out after sending the reply.
 
 ## Music
 
@@ -132,6 +154,19 @@ python -m bong.memory.migrate            # dry run: lists what would be imported
 python -m bong.memory.migrate --apply    # import from bong_data/chroma_db
 python -m bong.memory.migrate --about 273761843544064000 --about 773961674314219530 --apply
                                          # only memories about these Discord users
+```
+
+### Managing memories by hand
+
+Stop the bot first, then:
+
+```bash
+python -m bong.memory.manage list [--about USER_ID]
+python -m bong.memory.manage search "music taste" [--about USER_ID]
+python -m bong.memory.manage add "Eve loves drum and bass" --about 273761843544064000 --name Eve
+python -m bong.memory.manage edit 3f9a12bc "new text"
+python -m bong.memory.manage delete 3f9a12bc
+python -m bong.memory.manage forget-user 273761843544064000
 ```
 
 Texts and metadata (who, category, importance, date) are copied and re-embedded with the pinned model. The old database is read from a temporary copy, so it's never modified. Running it again skips memories that were already imported.

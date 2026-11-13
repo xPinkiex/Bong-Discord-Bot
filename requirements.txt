@@ -3,5 +3,7 @@ davey>=0.1          # Discord's voice encryption (DAVE)
 aiohttp>=3.9
 python-dotenv>=1.0
 yt-dlp              # keep up to date: YouTube changes often
+ddgs                # web / YouTube search
+tzdata              # timezone database (needed on Windows)
 # Pinned exactly: memory storage. Upgrade deliberately (embeddings are pinned separately).
 chromadb==1.5.9

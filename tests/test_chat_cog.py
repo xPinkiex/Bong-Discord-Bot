@@ -186,3 +186,25 @@ async def test_alias_replaces_discord_name_everywhere(setup):
     prompt = llm.calls_to("chat")[0][1][0]["content"]
     assert "Eve at" in prompt and f"user{FRIEND}" not in prompt
     assert bot.resolve_name("eve", SimpleNamespace(guild_id=None)) == (FRIEND, "Eve")
+
+
+async def test_outbox_files_reactions_and_shutdown(setup, tmp_path):
+    from bong.conversation.turn import Outbox
+    bot, cog, llm = setup
+    pic = tmp_path / "cat.png"
+    pic.write_bytes(b"x")
+    msg = make_message("bong")
+    msg.add_reaction = AsyncMock()
+    bot.close = AsyncMock()
+
+    turn = SimpleNamespace(outbox=Outbox(files=[pic], reactions=["❤️"], shutdown=True))
+    await cog.deliver(msg, turn, "here you go")
+    call = msg.channel.send.await_args
+    assert call.args == ("here you go",) and [f.filename for f in call.kwargs["files"]] == ["cat.png"]
+    msg.add_reaction.assert_any_await("❤️")
+    bot.close.assert_not_awaited()                       # FRIEND isn't an admin
+
+    owner_msg = make_message("bong", author_id=OWNER)
+    owner_msg.add_reaction = AsyncMock()
+    await cog.deliver(owner_msg, SimpleNamespace(outbox=Outbox(shutdown=True)), "bye")
+    bot.close.assert_awaited_once()

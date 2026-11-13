@@ -21,13 +21,19 @@ def _norm(text: str) -> str:
 
 
 class MusicLibrary:
-    def __init__(self, folder: Path):
+    """A folder of files matched by name. Used for songs (mp3), and for saved images and texts."""
+
+    def __init__(self, folder: Path, suffixes: tuple[str, ...] = (".mp3",)):
         self.folder = Path(folder)
+        self.suffixes = suffixes
 
     def songs(self) -> list[Path]:
         if not self.folder.exists():
             return []
-        return sorted(self.folder.glob("*.mp3"), key=lambda p: p.stem.lower())
+        return sorted((p for p in self.folder.iterdir() if p.is_file() and p.suffix.lower() in self.suffixes),
+                      key=lambda p: p.stem.lower())
+
+    files = songs
 
     def paths(self) -> list[str]:
         return [str(p) for p in self.songs()]

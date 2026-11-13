@@ -89,10 +89,19 @@ class UserStore:
 
     # --- settings ----------------------------------------------------------
 
-    def timezone(self, user_id: int) -> float | None:
-        """UTC offset in hours saved for this user (by the old bot), or None."""
+    def timezone(self, user_id: int) -> "str | float | None":
+        """The user's timezone: an IANA zone name ("Europe/Warsaw"), a fixed UTC offset in hours
+        (what the old bot stored), or None if not set."""
         value = self._users.get(user_id, {}).get("timezone")
-        return float(value) if isinstance(value, (int, float)) else None
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        return value if isinstance(value, str) and value else None
+
+    def set_timezone(self, user_id: int, spec: "str | float") -> None:
+        self._users.setdefault(user_id, {})["timezone"] = spec
+        self.save()
 
     def alias(self, user_id: int) -> str | None:
         """What Bong calls this person instead of their Discord name, if set."""
@@ -114,7 +123,18 @@ class UserStore:
         """Display names seen for users (saved when they were approved or chatted)."""
         return {uid: e["display_name"] for uid, e in self._users.items() if e.get("display_name")}
 
+    def count(self) -> int:
+        return len(self._users)
+
     # --- stats -------------------------------------------------------------
+
+    def total_tokens(self) -> int:
+        return sum(int(e.get("tokens", 0)) for e in self._users.values())
+
+    def top_by_tokens(self, n: int = 3) -> list[tuple[str, int]]:
+        ranked = sorted(((self.alias(uid) or e.get("display_name") or str(uid), int(e.get("tokens", 0)))
+                         for uid, e in self._users.items() if e.get("tokens")), key=lambda x: x[1], reverse=True)
+        return ranked[:n]
 
     def add_tokens(self, user_id: int, count: int, display_name: str = "") -> None:
         if count <= 0:

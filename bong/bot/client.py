@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import difflib
 import logging
+import time
 
 import discord
 from discord.ext import commands
@@ -12,17 +13,23 @@ from ..channels import ActiveChannels
 from ..config import Settings
 from ..conversation.bong import Bong
 from ..conversation.prompt import VoiceStatusSection
-from ..conversation.turn import Turn
+from ..conversation.turn import IMAGE_EXTS, TEXT_EXTS, Turn
 from ..llm import OllamaClient
 from ..memory import NullMemoryStore
 from ..music.library import MusicLibrary
 from ..music.stats import SongStats
+from ..reminders import ReminderStore
 from ..tools import Tool
+from ..tools.admin import shutdown_tool, stats_tool
+from ..tools.files import file_tools
 from ..tools.music import music_tools
+from ..tools.reminders import reminder_tools
+from ..tools.web import web_tools
 from ..tools.people import set_alias_tool
-from ..tools.time import current_time_tool
+from ..tools.time import current_time_tool, timezone_tools
 from ..users import UserStore
 from .admin import AdminCog
+from .background import BackgroundCog
 from .chat import ChatCog
 from .voice import VoiceController
 
@@ -45,6 +52,10 @@ class BongBot(commands.Bot):
         self.user_store = UserStore(settings.user_data_dir / "users.json", settings.owner_id)
         self.active_channels = ActiveChannels(settings.data_dir / "active_channels.json")
         self.llm = OllamaClient(settings.ollama_host, api_key=settings.ollama_api_key)
+        self.started_at = time.time()
+        self.reminders = ReminderStore(settings.user_data_dir / "reminders.json")
+        self.images = MusicLibrary(settings.data_dir / "saved_images", IMAGE_EXTS)
+        self.texts = MusicLibrary(settings.data_dir / "saved_texts", TEXT_EXTS)
         self.library = MusicLibrary(settings.data_dir / "saved_sounds")
         self.song_stats = SongStats(settings.data_dir / "song_stats.json")
         self.voice = VoiceController(self, self.library, self.song_stats)
@@ -56,19 +67,27 @@ class BongBot(commands.Bot):
         self.user_store.load()
         self.active_channels.load()
         self.song_stats.load()
+        self.reminders.load()
         await self._check_ollama()
 
+        s = self.settings
         tools: list[Tool] = [
             current_time_tool(self.user_store.timezone),
+            *timezone_tools(self.user_store.timezone, self.user_store.set_timezone),
+            *reminder_tools(self.reminders, self.user_store.timezone),
             set_alias_tool(self.user_store, self.resolve_name),
+            *web_tools(self.llm, s.helper_model),
+            *file_tools(self.llm, s.helper_model, self.images, self.texts),
             *music_tools(self.voice, self.library, lambda uid: self.user_store.has(uid, "music")),
+            stats_tool(self.collect_stats),
+            shutdown_tool(self.user_store.is_admin),
         ]
         memory = await self._start_memory()
+        self.memory = memory
         if memory is not None:
             from ..tools.memory import memory_tools
             tools += memory_tools(memory, self.resolve_name, self.user_store.is_admin)
 
-        s = self.settings
         self.bong = Bong(
             self.llm,
             chat_model=s.chat_model,
@@ -84,6 +103,21 @@ class BongBot(commands.Bot):
         log.info("Tools: %s", ", ".join(self.bong.tools.names()))
         await self.add_cog(ChatCog(self))
         await self.add_cog(AdminCog(self))
+        await self.add_cog(BackgroundCog(self))
+
+    async def collect_stats(self) -> dict:
+        memory = getattr(self, "memory", None)
+        return {
+            "started_at": self.started_at,
+            "memories": await memory.count() if memory is not None else None,
+            "known_users": self.user_store.count(),
+            "reminders": self.reminders.count(),
+            "songs": len(self.library.songs()),
+            "total_plays": self.song_stats.total(),
+            "top_songs": self.song_stats.top(3),
+            "total_tokens": self.user_store.total_tokens(),
+            "top_users": self.user_store.top_by_tokens(3),
+        }
 
     async def _start_memory(self):
         if not self.settings.memory_enabled:

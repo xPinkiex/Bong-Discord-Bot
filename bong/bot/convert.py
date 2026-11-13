@@ -7,7 +7,7 @@ from typing import Callable
 import discord
 
 from ..conversation.history import HistoryEntry
-from ..conversation.turn import ReplyInfo, Turn
+from ..conversation.turn import Attachment, ReplyInfo, Turn
 
 
 # Automated messages the bot sends (including the old bot's features). They aren't
@@ -63,7 +63,9 @@ def to_turn(message: discord.Message, me: discord.abc.User,
         channel_id=message.channel.id,
         content=message.clean_content,
         guild_id=message.guild.id if message.guild else None,
-        attachments=tuple(a.filename for a in message.attachments),
+        attachments=tuple(Attachment(a.filename, a.url, a.content_type or "", a.size or 0,
+                                     getattr(a, "width", None), getattr(a, "height", None))
+                          for a in message.attachments),
         reply_to=reply_info,
         mentions_bong=mentions_bong,
         sent_at=_local(message.created_at),

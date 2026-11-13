@@ -7,6 +7,8 @@ dependencies = [
     "discord.py[voice]>=2.7",
     "davey>=0.1",
     "yt-dlp",
+    "ddgs",
+    "tzdata",
     "aiohttp>=3.9",
     "python-dotenv>=1.0",
     "chromadb==1.5.9",

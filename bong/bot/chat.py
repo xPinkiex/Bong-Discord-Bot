@@ -109,6 +109,29 @@ class ChatCog(commands.Cog):
                 await message.channel.send(ERROR_REPLY)
                 return
 
-        for chunk in split_message(reply.text):
-            await message.channel.send(chunk)
+        await self.deliver(message, turn, reply.text)
         users.add_tokens(message.author.id, reply.tokens, message.author.display_name)
+
+    async def deliver(self, message: discord.Message, turn, text: str) -> None:
+        """Send the reply, plus whatever the tools put in the turn's outbox."""
+        out = turn.outbox
+        chunks = split_message(text) or [""]
+        files = [discord.File(str(p)) for p in out.files[:10] if p.exists()]
+        for i, chunk in enumerate(chunks):
+            last = i == len(chunks) - 1
+            if last and files:
+                await message.channel.send(chunk or None, files=files)
+            elif chunk:
+                await message.channel.send(chunk)
+        for emoji in out.reactions:
+            try:
+                await message.add_reaction(emoji)
+            except discord.HTTPException as e:
+                log.debug("Couldn't react with %s: %s", emoji, e)
+        if out.shutdown and self.bot.user_store.is_admin(message.author.id):
+            log.info("Shutdown requested by %s", message.author)
+            try:
+                await message.add_reaction("\U0001fae1")
+            except discord.HTTPException:
+                pass
+            await self.bot.close()
