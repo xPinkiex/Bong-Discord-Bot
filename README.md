@@ -2,12 +2,12 @@
 
 A Discord chat bot with a protogen personality, powered by a local or cloud LLM through [Ollama](https://ollama.com).
 
-This branch is a ground-up rewrite of the text side of Bong. It focuses on chatting, keeps the code split into small modules, and has a memory interface ready for per-user memories. Music, voice, e621, reminders and the LLM tool loop from the old bot are not included yet.
+This branch is a ground-up rewrite of the text side of Bong: chatting, per-user long-term memory and tools, with the code split into small modules. Music, voice, e621, reminders and web search from the old bot are not included yet.
 
 ## What she does
 
 - **Chats in character.** Her prompt is [`bong/persona/persona.md`](bong/persona/persona.md): the original prompt word for word, minus the lines for features that aren't back yet, plus permission to swear. Like the original, it's sent as one user message with history newest first. Edit that file to change how she talks.
-- **Uses tools.** Right now there's one, `current_time`. It uses the timezone saved in `users.json` (from the old bot) or the time where she's running. Tools live in `bong/tools/`, and a new one is a name, a description and an async function.
+- **Uses tools.** Right now: `current_time` and her memory tools (below). It uses the timezone saved in `users.json` (from the old bot) or the time where she's running. Tools live in `bong/tools/`, and a new one is a name, a description and an async function.
 - **Knows when she's being talked to.** DMs, pings, replies to her, and any message containing "bong" are answered directly. Anything else in an active channel goes to a small classifier model ([`classifier.md`](bong/persona/classifier.md)) that's told to lean towards "yes".
 - **Follows the conversation.** Each channel keeps a rolling history of the last 30 messages, including ones not meant for her. When it fills up, the oldest 10 are summarized in the background (up to 5 summaries are kept). On first use, history is loaded from Discord, skipping automated messages like the old bot's e621 alerts and approval notices.
 - **Understands replies.** If you reply to a message, she sees what you replied to.
@@ -45,8 +45,11 @@ bong/
     detector.py        "Is this for Bong?"
     prompt.py          Fills persona.md from pluggable sections
     bong.py            Bong: is_for_bong / record / respond (with tool loop), Cooldown
-  memory/              Memory + MemoryStore interface, NullMemoryStore
-  tools/               Tool + ToolBox; time.py (current_time)
+  memory/              Memory + MemoryStore interface
+    chroma_store.py    Chroma-backed store: recall ranking, dedupe, backups, re-embedding
+    embedder.py        Pinned all-MiniLM-L6-v2 (hash-checked)
+    migrate.py         Import from the old bot's chroma_db
+  tools/               Tool + ToolBox; time.py (current_time); memory.py (save/recall/update/forget)
   bot/                 The discord.py layer
     client.py          BongBot: builds everything once in setup_hook
     chat.py            on_message pipeline
@@ -70,20 +73,43 @@ on_message (bot/chat.py)
 
 Who is talking travels in the `Turn` object instead of in global variables. Replies are handled one at a time per channel, so history stays in order, and different channels don't block each other.
 
-## Adding memories later
+## Memory
 
-`bong/memory/__init__.py` defines the interface:
+Bong remembers things about people with her own tools. She decides what's worth saving, and it all stays on your machine.
 
-```python
-class MemoryStore(Protocol):
-    async def recall(self, turn: Turn, limit: int = 8) -> list[Memory]: ...
-    async def observe(self, turn: Turn, reply: str) -> None: ...
+| Tool | What it does |
+|---|---|
+| `save_memory` | Save a fact with a category, importance 1–5, and who it's about (a display name, resolved to the Discord user) |
+| `recall_memories` | Search, either about one person or everything |
+| `update_memory` | Correct a memory by its ID (`#3f9a12bc`) |
+| `forget_memory` | Delete a memory by its ID |
+
+- **Recall before each reply.** The prompt gets memories about the person talking (the most relevant, plus their most important ones regardless), general facts relevant to the message, and memories about other people if the message is about them.
+- **Who can change what.** A memory can be updated or forgotten by the person it's about, by whoever saved it, or by an admin. Nobody can rewrite what Bong knows about someone else.
+- **Near-duplicates aren't saved twice.**
+
+### Pinned embedding model
+
+Memories are matched by meaning using **all-MiniLM-L6-v2**, a small model that runs on the CPU next to Bong (no Ollama involved), so it works the same in local and direct mode. It's downloaded once (~80 MB) to `bong_data/embedding_model/`. To keep a model change from breaking memory:
+
+- The model files are checked against SHA-256 hashes in `bong/memory/embedder.py` on every start. If they don't match, Bong refuses to use them.
+- Bong computes embeddings herself and Chroma only stores them, so upgrading Chroma can't swap the model. `chromadb` is also pinned to an exact version.
+- A fixed probe sentence is embedded at startup and compared with the stored result. If the model ever does change, every memory is re-embedded from its saved text (after writing a backup), instead of the old vectors silently going stale.
+
+Files in `bong_data/memory/`: the Chroma database, `embedding.json` (model + probe), and `memories-backup.json`, a readable export of every memory, updated on each change. Set `BONG_MEMORY=off` to run without memory.
+
+### Importing the old bot's memories
+
+```bash
+python -m bong.memory.migrate            # dry run: lists what would be imported
+python -m bong.memory.migrate --apply    # import from bong_data/chroma_db
 ```
 
-- `recall` runs before every reply. Whatever it returns fills `{memories}` in the prompt. `turn.author_id` tells you whose memories to fetch.
-- `observe` runs after every reply, so a store can pull out facts to save.
+Texts and metadata (who, category, importance, date) are copied and re-embedded with the pinned model. The old database is read from a temporary copy, so it's never modified. Running it again skips memories that were already imported.
 
-To turn memories on, write a class with those two methods (backed by JSON, ChromaDB or anything else) and pass it in: `BongBot(settings, memory=MyStore(...))` in `bong/__main__.py`. Nothing else changes. Memory tools (save/recall/forget) can be added as `Tool`s in `bong/tools/`. For other kinds of context, write a `PromptSection` that returns `{"placeholder": text}`, put `{placeholder}` in `persona.md`, and add the section in `conversation/prompt.py:default_sections`.
+### Other context and tools
+
+For new tools, add a `Tool` in `bong/tools/` and include it in `setup_hook` in `bong/bot/client.py`. For other kinds of context, write a `PromptSection` that returns `{"placeholder": text}`, put `{placeholder}` in `persona.md`, and add the section in `conversation/prompt.py:default_sections`.
 
 ## Setup
 

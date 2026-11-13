@@ -17,7 +17,7 @@ from typing import Protocol
 
 from .. import persona
 from ..llm import ChatMessage
-from ..memory import Memory, MemoryStore
+from ..memory import MemoryStore
 from .history import ChannelHistory
 from .turn import Turn
 
@@ -45,11 +45,7 @@ class MemorySection:
 
     async def render(self, ctx: PromptContext) -> dict[str, str]:
         memories = await self.store.recall(ctx.turn, self.limit)
-        return {"memories": "\n".join(_format_memory(m) for m in memories)}
-
-
-def _format_memory(m: Memory) -> str:
-    return f"[about {m.about_name}] {m.text}" if m.about_name else m.text
+        return {"memories": "\n".join(f"- {m.for_prompt()}" for m in memories)}
 
 
 class MessageSection:

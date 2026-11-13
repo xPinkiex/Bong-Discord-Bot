@@ -92,6 +92,10 @@ class UserStore:
         value = self._users.get(user_id, {}).get("timezone")
         return float(value) if isinstance(value, (int, float)) else None
 
+    def known_names(self) -> dict[int, str]:
+        """Display names seen for users (saved when they were approved or chatted)."""
+        return {uid: e["display_name"] for uid, e in self._users.items() if e.get("display_name")}
+
     # --- stats -------------------------------------------------------------
 
     def add_tokens(self, user_id: int, count: int, display_name: str = "") -> None:

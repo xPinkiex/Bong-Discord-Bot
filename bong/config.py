@@ -47,6 +47,7 @@ OLLAMA_API_KEY={API_KEY_PLACEHOLDER}
 # BONG_CHAT_MODEL=glm-5.2:cloud          # direct mode: glm-5.2
 # BONG_HELPER_MODEL=gemma4:31b-cloud     # direct mode: gemma4:31b
 # BONG_COOLDOWN_SECONDS=60
+# BONG_MEMORY=off                        # turn long-term memory off
 """
 
 
@@ -83,6 +84,7 @@ class Settings:
     summarize_chunk: int = 10                  # oldest messages folded into one summary
     max_summaries: int = 5                     # summaries kept per channel
     classifier_context: int = 7                # recent messages shown to the classifier
+    memory_enabled: bool = True                # long-term memory (BONG_MEMORY=off to disable)
 
     # Paths
     data_dir: Path = field(default=PROJECT_ROOT / "bong_data")
@@ -136,6 +138,8 @@ class Settings:
             kwargs["chat_model"] = v
         if v := os.getenv("BONG_HELPER_MODEL"):
             kwargs["helper_model"] = v
+        if (v := os.getenv("BONG_MEMORY")) and v.strip().lower() in ("0", "off", "false", "no"):
+            kwargs["memory_enabled"] = False
         if v := os.getenv("BONG_COOLDOWN_SECONDS"):
             kwargs["cooldown_seconds"] = float(v)
         return cls(**kwargs)

@@ -125,7 +125,7 @@ async def test_memory_store_is_queried_and_observed():
 
     assert memory.recalled_for == [1]
     assert memory.observed == [(1, "noted :3")]
-    assert "[about Eve] loves dubstep" in llm.calls_to(CHAT)[0][1][0]["content"]
+    assert "- loves dubstep (about Eve)" in llm.calls_to(CHAT)[0][1][0]["content"]
 
 
 async def test_memory_block_is_empty_when_store_is_empty():

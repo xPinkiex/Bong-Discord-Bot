@@ -51,3 +51,5 @@ todo.txt
 bong_data/active_channels.json
 *.bak
 *.tmp
+bong_data/memory/
+bong_data/embedding_model/
