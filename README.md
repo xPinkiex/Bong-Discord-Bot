@@ -100,10 +100,10 @@ Bong can reach the models in two ways, chosen when you start her:
 
 | | Command | Talks to | Needs | Default models (chat / helper) |
 |---|---|---|---|---|
-| **Local** (default) | `python -m bong` | Your Ollama server at `OLLAMA_HOST` | Ollama running (signed in for `:cloud` models) | `glm-5.1:cloud` / `gemma3:12b-cloud` |
+| **Local** (default) | `python -m bong` | Your Ollama server at `OLLAMA_HOST` | Ollama running (signed in for cloud models) | `glm-5.2:cloud` / `gemma4:31b-cloud` |
 | **Direct** | `python -m bong --direct` | `https://ollama.com` API | `OLLAMA_API_KEY` | `glm-5.2` / `gemma4:31b` |
 
-The direct API has its own model list, without the `:cloud` names, which is why the defaults differ. `BONG_CHAT_MODEL` / `BONG_HELPER_MODEL` override the models in either mode. At startup Bong logs which mode and models she's using, and warns (with the available list) if a model isn't offered.
+Both modes use the same models (glm-5.1 and gemma3 were retired by Ollama in 2026). Local Ollama names cloud models with a cloud tag; the direct API uses the plain names. Run `ollama pull glm-5.2:cloud` and `ollama pull gemma4:31b-cloud` once to check the local names. `BONG_CHAT_MODEL` / `BONG_HELPER_MODEL` override the models in either mode. At startup Bong logs which mode and models she's using, and warns (with the available list) if a model isn't offered.
 
 ### `.env`
 

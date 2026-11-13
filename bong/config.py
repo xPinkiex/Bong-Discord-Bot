@@ -15,10 +15,11 @@ DEFAULT_OWNER_ID = 273761843544064000
 LOCAL, DIRECT = "local", "direct"
 DIRECT_HOST = "https://ollama.com"
 
-# Default models per mode. Local Ollama reaches cloud models via the ":cloud"/"-cloud"
-# names; the direct API (ollama.com) has its own catalogue, so it gets its own defaults.
+# Default models per mode — the same models either way (glm-5.1 and gemma3 were
+# retired by Ollama in 2026). Local Ollama reaches cloud models by their cloud tag;
+# the direct API (ollama.com) uses the plain names.
 DEFAULT_MODELS = {
-    LOCAL: {"chat": "glm-5.1:cloud", "helper": "gemma3:12b-cloud"},
+    LOCAL: {"chat": "glm-5.2:cloud", "helper": "gemma4:31b-cloud"},
     DIRECT: {"chat": "glm-5.2", "helper": "gemma4:31b"},
 }
 
