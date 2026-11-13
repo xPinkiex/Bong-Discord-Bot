@@ -1,4 +1,4 @@
-"""Run Bong:  python -m bong [-d]"""
+"""Run Bong:  python -m bong [-d] [--direct]"""
 
 from __future__ import annotations
 
@@ -30,9 +30,11 @@ def setup_logging(settings: Settings, debug: bool) -> None:
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="bong", description="Bong Discord bot")
     parser.add_argument("-d", "--debug", action="store_true", help="enable debug logging")
+    parser.add_argument("--direct", action="store_true",
+                        help="use ollama.com's API directly (needs OLLAMA_API_KEY) instead of a local Ollama at OLLAMA_HOST")
     args = parser.parse_args(argv)
 
-    settings = Settings.from_env()
+    settings = Settings.from_env(direct=args.direct)
     setup_logging(settings, args.debug)
 
     from .bot.client import BongBot

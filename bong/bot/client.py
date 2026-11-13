@@ -34,7 +34,7 @@ class BongBot(commands.Bot):
         self.settings = settings
         self.user_store = UserStore(settings.user_data_dir / "users.json", settings.owner_id)
         self.active_channels = ActiveChannels(settings.data_dir / "active_channels.json")
-        self.llm = OllamaClient(settings.ollama_host)
+        self.llm = OllamaClient(settings.ollama_host, api_key=settings.ollama_api_key)
         self.bong = Bong(
             self.llm,
             chat_model=settings.chat_model,
@@ -50,13 +50,24 @@ class BongBot(commands.Bot):
         # Runs once, before connecting — unlike on_ready, which repeats on reconnect.
         self.user_store.load()
         self.active_channels.load()
-        if await self.llm.is_available():
-            log.info("Ollama is reachable at %s", self.settings.ollama_host)
-        else:
-            log.warning("Ollama is not reachable at %s — Bong will error until it is "
-                        "(start it with `ollama serve`).", self.settings.ollama_host)
+        await self._check_ollama()
         await self.add_cog(ChatCog(self))
         await self.add_cog(AdminCog(self))
+
+    async def _check_ollama(self) -> None:
+        s = self.settings
+        log.info("Ollama mode: %s (%s) — chat model %s, helper model %s",
+                 s.ollama_mode, s.ollama_host, s.chat_model, s.helper_model)
+        models = await self.llm.list_models()
+        if models is None:
+            hint = "start it with `ollama serve`" if s.ollama_mode == "local" else "check your connection"
+            log.warning("Ollama is not reachable at %s — Bong will error until it is (%s).", s.ollama_host, hint)
+            return
+        # Local servers list cloud models only once pulled, so a miss there is just a hint.
+        missing = [m for m in (s.chat_model, s.helper_model) if m not in models]
+        if missing:
+            log.warning("Model(s) %s not listed at %s. Available: %s",
+                        ", ".join(missing), s.ollama_host, ", ".join(sorted(models)) or "none")
 
     async def on_ready(self) -> None:
         log.info("Logged in as %s (%s), active in %d channel(s)",

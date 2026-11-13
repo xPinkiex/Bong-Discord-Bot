@@ -31,11 +31,11 @@ This branch is a ground-up rewrite of the text side of Bong. It focuses on chatt
 ```
 bong/
   __main__.py          python -m bong [-d]
-  config.py            Settings from .env (token, owner, Ollama host, models, limits)
+  config.py            Settings from .env (token, owner, Ollama mode/host/key, models, limits)
   storage.py           Atomic JSON files with .bak backups
   users.py             Permission tags + token stats (users.json)
   channels.py          Active channel set
-  llm.py               Async Ollama client (aiohttp), retries on network errors
+  llm.py               Async Ollama client (aiohttp), local or ollama.com with API key
   textutil.py          Splitting replies at Discord's 2000-char limit
   persona/             persona.md, classifier.md, template filling
   conversation/        No discord.py imports — all unit-testable
@@ -85,29 +85,49 @@ To turn memories on, write a class with those two methods (backed by JSON, Chrom
 
 ## Setup
 
-Requires Python 3.10+ and Ollama with the models below (or change them in `.env`).
+Requires Python 3.10+.
 
 ```bash
 python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-`.env` in the project root:
+### Ollama: local or direct
+
+Bong can reach the models in two ways, chosen when you start her:
+
+| | Command | Talks to | Needs | Default models (chat / helper) |
+|---|---|---|---|---|
+| **Local** (default) | `python -m bong` | Your Ollama server at `OLLAMA_HOST` | Ollama running (signed in for `:cloud` models) | `glm-5.1:cloud` / `gemma3:12b-cloud` |
+| **Direct** | `python -m bong --direct` | `https://ollama.com` API | `OLLAMA_API_KEY` | `glm-5.2` / `gemma4:31b` |
+
+The direct API has its own model list, without the `:cloud` names, which is why the defaults differ. `BONG_CHAT_MODEL` / `BONG_HELPER_MODEL` override the models in either mode. At startup Bong logs which mode and models she's using, and warns (with the available list) if a model isn't offered.
+
+### `.env`
+
+Put this in the project root:
 
 ```
 DISCORD_TOKEN=...                       # required
 OWNER_ID=273761843544064000             # optional, gets approval requests + always admin
-OLLAMA_HOST=127.0.0.1:11434             # optional
-BONG_CHAT_MODEL=glm-5.1:cloud           # optional, Bong's replies
-BONG_HELPER_MODEL=gemma3:12b-cloud      # optional, classifier + summaries
+
+# Local mode
+OLLAMA_HOST=127.0.0.1:11434             # optional, IP:port of your Ollama server
+
+# Direct mode (--direct)
+OLLAMA_API_KEY=...                      # from ollama.com/settings/keys
+
+BONG_CHAT_MODEL=...                     # optional, Bong's replies
+BONG_HELPER_MODEL=...                   # optional, classifier + summaries
 BONG_COOLDOWN_SECONDS=60                # optional
 ```
 
 The bot needs the **Message Content** and **Server Members** intents enabled in the Discord developer portal.
 
 ```bash
-python -m bong        # run
-python -m bong -d     # run with debug logging
+python -m bong                 # local Ollama
+python -m bong --direct        # ollama.com with OLLAMA_API_KEY
+python -m bong -d              # either, with debug logging
 ```
 
 Logs go to the console and `bong_data/logs/`.
