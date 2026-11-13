@@ -87,7 +87,7 @@ To turn memories on, write a class with those two methods (backed by JSON, Chrom
 
 ## Setup
 
-Requires Python 3.10+.
+Requires Python 3.10+. On the first run without a `.env`, Bong creates one with placeholders and stops; fill it in and run again.
 
 ```bash
 python -m venv venv && source venv/bin/activate

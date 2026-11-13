@@ -110,3 +110,40 @@ async def test_bad_key_gives_clear_error(fake_ollama):
     with pytest.raises(LLMError, match="OLLAMA_API_KEY"):
         await client.chat("m", [{"role": "user", "content": "hi"}])
     await client.close()
+
+
+# --- first run: .env generation ---------------------------------------------
+
+def test_missing_env_file_is_created_with_placeholders(monkeypatch, tmp_path):
+    import os, stat
+    from bong.config import TOKEN_PLACEHOLDER
+    for var in ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    path = tmp_path / ".env"
+    with pytest.raises(SystemExit, match="Created"):
+        Settings.from_env(env_file=path)
+    text = path.read_text()
+    assert f"DISCORD_TOKEN={TOKEN_PLACEHOLDER}" in text and "OLLAMA_API_KEY=" in text
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+
+    # Second run with placeholders still in place: refuses, doesn't overwrite.
+    with pytest.raises(SystemExit, match="DISCORD_TOKEN is not set"):
+        Settings.from_env(env_file=path)
+    assert path.read_text() == text
+
+
+def test_placeholder_api_key_is_rejected_in_direct_mode(monkeypatch, tmp_path):
+    from bong.config import API_KEY_PLACEHOLDER
+    for var in ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    path = tmp_path / ".env"
+    path.write_text(f"DISCORD_TOKEN=real\nOLLAMA_API_KEY={API_KEY_PLACEHOLDER}\n")
+    assert Settings.from_env(env_file=path).ollama_mode == "local"   # local doesn't need it
+    with pytest.raises(SystemExit, match="OLLAMA_API_KEY"):
+        Settings.from_env(direct=True, env_file=path)
+
+
+def test_no_env_file_needed_when_token_is_in_environment(env, tmp_path):
+    path = tmp_path / "nothing-here" / ".env"
+    assert Settings.from_env(env_file=path).discord_token == "tok"
+    assert not path.exists()

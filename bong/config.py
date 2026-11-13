@@ -24,6 +24,39 @@ DEFAULT_MODELS = {
 }
 
 
+TOKEN_PLACEHOLDER = "paste-your-discord-bot-token-here"
+API_KEY_PLACEHOLDER = "paste-your-ollama-api-key-here"
+
+ENV_TEMPLATE = f"""\
+# Bong settings. Lines starting with # are ignored.
+
+# Required: the bot's token
+# (Discord developer portal -> your app -> Bot -> Reset Token)
+DISCORD_TOKEN={TOKEN_PLACEHOLDER}
+
+# Discord user ID that gets DM approval requests and is always admin
+OWNER_ID={DEFAULT_OWNER_ID}
+
+# Local mode (python -m bong): address of your Ollama server
+OLLAMA_HOST=127.0.0.1:11434
+
+# Direct mode (python -m bong --direct): API key from ollama.com/settings/keys
+OLLAMA_API_KEY={API_KEY_PLACEHOLDER}
+
+# Optional overrides (remove the # to use)
+# BONG_CHAT_MODEL=glm-5.2:cloud          # direct mode: glm-5.2
+# BONG_HELPER_MODEL=gemma4:31b-cloud     # direct mode: gemma4:31b
+# BONG_COOLDOWN_SECONDS=60
+"""
+
+
+def create_env_file(path: Path) -> None:
+    """Write a .env with placeholders, readable only by the owner (it will hold secrets)."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(ENV_TEMPLATE)
+
+
 def _normalize_host(host: str) -> str:
     host = host.strip().rstrip("/")
     if not host.startswith(("http://", "https://")):
@@ -67,15 +100,20 @@ class Settings:
         Direct mode talks to ollama.com's API and needs OLLAMA_API_KEY.
         BONG_CHAT_MODEL / BONG_HELPER_MODEL override the models in either mode.
         """
+        env_path = Path(env_file or PROJECT_ROOT / ".env")
+        if not env_path.exists() and not os.getenv("DISCORD_TOKEN"):
+            create_env_file(env_path)
+            raise SystemExit(f"Created {env_path} with placeholders. "
+                             f"Fill in DISCORD_TOKEN (and OLLAMA_API_KEY for --direct), then run again.")
         try:
             from dotenv import load_dotenv
-            load_dotenv(env_file or PROJECT_ROOT / ".env")
+            load_dotenv(env_path)
         except ImportError:  # python-dotenv is optional
             pass
 
-        token = os.getenv("DISCORD_TOKEN", "")
-        if not token:
-            raise SystemExit("DISCORD_TOKEN is not set (put it in .env or the environment).")
+        token = os.getenv("DISCORD_TOKEN", "").strip()
+        if not token or token == TOKEN_PLACEHOLDER:
+            raise SystemExit(f"DISCORD_TOKEN is not set — put the bot's token in {env_path}.")
 
         mode = DIRECT if direct else LOCAL
         kwargs: dict = {
@@ -88,7 +126,7 @@ class Settings:
             kwargs["owner_id"] = int(v)
         if direct:
             key = os.getenv("OLLAMA_API_KEY", "").strip()
-            if not key:
+            if not key or key == API_KEY_PLACEHOLDER:
                 raise SystemExit("--direct needs OLLAMA_API_KEY (create one at ollama.com/settings/keys).")
             kwargs["ollama_host"] = DIRECT_HOST
             kwargs["ollama_api_key"] = key
