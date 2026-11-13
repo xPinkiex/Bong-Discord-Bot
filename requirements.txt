@@ -1,6 +1,7 @@
 discord.py[voice]>=2.7
 davey>=0.1          # Discord's voice encryption (DAVE)
 aiohttp>=3.9
+Pillow>=10          # images for the vision model
 python-dotenv>=1.0
 yt-dlp              # keep up to date: YouTube changes often
 ddgs                # web / YouTube search

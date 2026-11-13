@@ -12,6 +12,7 @@ delivers them with the reply.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import re
@@ -38,17 +39,46 @@ LABEL_PROMPT = ("Describe this image in exactly 5 words as a short label suitabl
                 "Orange_cat_sleeping_on_couch, Beautiful_sunset_over_the_ocean. Reply with ONLY the label, nothing else.")
 
 
+async def read_limited(resp: aiohttp.ClientResponse, limit: int, what: str) -> bytes:
+    """Read a whole response body, refusing more than `limit` bytes.
+    (A single content.read(n) only returns what has arrived so far, which truncates big files.)"""
+    data = bytearray()
+    async for chunk in resp.content.iter_chunked(64 * 1024):
+        data += chunk
+        if len(data) > limit:
+            raise ValueError(f"{what} is too big (over {limit // (1024 * 1024)} MB).")
+    return bytes(data)
+
+
 async def fetch_attachment(attachment: Attachment, limit: int) -> bytes:
     """Download an attachment from Discord's CDN, refusing anything over `limit` bytes."""
     if attachment.size and attachment.size > limit:
         raise ValueError(f"'{attachment.filename}' is too big ({attachment.size // 1024} KB).")
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
         async with session.get(attachment.url) as resp:
             resp.raise_for_status()
-            data = await resp.content.read(limit + 1)
-    if len(data) > limit:
-        raise ValueError(f"'{attachment.filename}' is too big.")
-    return data
+            return await read_limited(resp, limit, f"'{attachment.filename}'")
+
+
+MAX_SIDE = 1600  # pixels; bigger images are scaled down before the vision model sees them
+
+
+def prepare_image(data: bytes) -> bytes:
+    """Turn any image (webp, gif, animated, huge...) into a modest PNG of its first frame.
+    Raises ValueError if the data isn't an image."""
+    import io
+    from PIL import Image, UnidentifiedImageError
+
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            img.seek(0)
+            frame = img.convert("RGBA" if "A" in img.getbands() or img.mode == "P" else "RGB")
+    except (UnidentifiedImageError, OSError) as e:
+        raise ValueError("that file isn't an image I can open") from e
+    frame.thumbnail((MAX_SIDE, MAX_SIDE))
+    out = io.BytesIO()
+    frame.save(out, format="PNG", optimize=True)
+    return out.getvalue()
 
 
 def _safe_stem(text: str, fallback: str) -> str:
@@ -88,7 +118,11 @@ def file_tools(llm: LLM, vision_model: str, images: MusicLibrary, texts: MusicLi
             data = await fetch(att, MAX_IMAGE_BYTES)
         except Exception as e:
             return f"Couldn't download '{att.filename}': {e}"
-        b64 = base64.b64encode(data).decode()
+        try:
+            png = await asyncio.to_thread(prepare_image, data)
+        except ValueError as e:
+            return f"Couldn't look at '{att.filename}': {e}."
+        b64 = base64.b64encode(png).decode()
         try:
             result = await llm.chat(vision_model, [{"role": "user", "content": question, "images": [b64]}],
                                     temperature=0.3, num_predict=800)

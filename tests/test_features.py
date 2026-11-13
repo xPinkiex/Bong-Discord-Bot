@@ -147,12 +147,25 @@ async def test_due_reminders_are_dmed():
 
 # --- images, texts, reactions ------------------------------------------------------------------
 
+def image_bytes(fmt="PNG", size=(64, 48), frames=1):
+    import io
+    from PIL import Image
+    imgs = [Image.new("RGB", size, (0, 200 - 40 * i, 0)) for i in range(frames)]
+    out = io.BytesIO()
+    if frames > 1:
+        imgs[0].save(out, format=fmt, save_all=True, append_images=imgs[1:], duration=100, loop=0)
+    else:
+        imgs[0].save(out, format=fmt)
+    return out.getvalue()
+
+
 @pytest.fixture
 def file_rig(tmp_path):
-    images = MusicLibrary(tmp_path / "saved_images", (".png", ".jpg"))
+    images = MusicLibrary(tmp_path / "saved_images", (".png", ".jpg", ".webp"))
     texts = MusicLibrary(tmp_path / "saved_texts", (".txt", ".py"))
     llm = FakeLLM({"vision": ["A green square that says HELLO BONG.", "Green_square_hello_bong_text"]})
-    blobs = {"https://cdn/x.png": b"\x89PNG fake", "https://cdn/notes.py": b"print('hi')\n" * 3}
+    blobs = {"https://cdn/x.png": image_bytes(), "https://cdn/notes.py": b"print('hi')\n" * 3,
+             "https://cdn/anim.webp": image_bytes("WEBP", frames=3), "https://cdn/fake.png": b"<html>nope</html>"}
 
     async def fetch(att, limit):
         return blobs[att.url]
@@ -169,6 +182,58 @@ async def test_describe_image_uses_vision_and_saves(file_rig):
     assert sent["content"] == "What is this?" and sent["images"]
     assert [p.name for p in images.files()] == ["Green_square_hello_bong_text.png"]
     assert "no image attached" in await tools["describe_image"](make_turn(), {})
+
+
+async def test_describe_image_handles_animated_webp_and_non_images(file_rig):
+    import base64, io
+    from PIL import Image
+    tools, llm, images, _ = file_rig
+    anim = make_turn(attachments=(Attachment("dbb5de08.webp", "https://cdn/anim.webp", "image/webp"),))
+    assert (await tools["describe_image"](anim, {})).startswith("Description of 'dbb5de08.webp'")
+    sent = base64.b64decode(llm.calls[0][1][0]["images"][0])
+    assert Image.open(io.BytesIO(sent)).format == "PNG"          # converted, first frame
+    fake = make_turn(attachments=(Attachment("x.png", "https://cdn/fake.png", "image/png"),))
+    assert await tools["describe_image"](fake, {}) == "Couldn't look at 'x.png': that file isn't an image I can open."
+
+
+def test_prepare_image_shrinks_and_flattens():
+    import io
+    from PIL import Image
+    from bong.tools.files import MAX_SIDE, prepare_image
+    big = Image.open(io.BytesIO(prepare_image(image_bytes("JPEG", size=(4000, 3000)))))
+    assert big.format == "PNG" and max(big.size) == MAX_SIDE and big.size == (1600, 1200)
+    gif = Image.open(io.BytesIO(prepare_image(image_bytes("GIF", frames=4))))
+    assert getattr(gif, "n_frames", 1) == 1
+
+
+async def test_fetch_attachment_reads_the_whole_file():
+    """Regression: a single content.read(n) returned only the first chunk, corrupting bigger images."""
+    import asyncio, os
+    from aiohttp import web
+    from bong.tools.files import fetch_attachment
+    payload = os.urandom(3 * 1024 * 1024)
+
+    async def slow(request):
+        resp = web.StreamResponse()
+        await resp.prepare(request)
+        for i in range(0, len(payload), 100_000):
+            await resp.write(payload[i:i + 100_000])
+            await asyncio.sleep(0.001)
+        return resp
+    app = web.Application()
+    app.router.add_get("/img.webp", slow)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    try:
+        got = await fetch_attachment(Attachment("img.webp", f"http://127.0.0.1:{port}/img.webp"), 10 * 1024 * 1024)
+        assert got == payload
+        with pytest.raises(ValueError, match="too big"):
+            await fetch_attachment(Attachment("img.webp", f"http://127.0.0.1:{port}/img.webp"), 1024 * 1024)
+    finally:
+        await runner.cleanup()
 
 
 async def test_read_text_file_saves_and_returns_content(file_rig):

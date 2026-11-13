@@ -117,8 +117,16 @@ async def fetch_page_text(url: str) -> str:
             kind = resp.headers.get("Content-Type", "")
             if "text/html" not in kind and "text/plain" not in kind:
                 raise ValueError(f"Can only summarize web pages, not {kind or 'unknown content'}.")
-            raw = await resp.content.read(MAX_PAGE_BYTES)
-            text = raw.decode(resp.get_encoding() or "utf-8", errors="replace")
+            raw = bytearray()
+            async for chunk in resp.content.iter_chunked(64 * 1024):
+                raw += chunk
+                if len(raw) >= MAX_PAGE_BYTES:  # plenty for a summary; stop reading
+                    break
+            try:
+                encoding = resp.get_encoding()
+            except RuntimeError:
+                encoding = "utf-8"
+            text = bytes(raw).decode(encoding or "utf-8", errors="replace")
     return html_to_text(text) if "text/html" in kind else text
 
 

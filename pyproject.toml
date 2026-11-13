@@ -10,6 +10,7 @@ dependencies = [
     "ddgs",
     "tzdata",
     "aiohttp>=3.9",
+    "Pillow>=10",
     "python-dotenv>=1.0",
     "chromadb==1.5.9",
 ]
